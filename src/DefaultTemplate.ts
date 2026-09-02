@@ -377,6 +377,23 @@ function samePinned(a: PinnedMessage | null, b: PinnedMessage | null): boolean {
   return a.kind === b.kind && a.text === b.text && a.name === b.name && a.id === b.id;
 }
 
+/**
+ * activity-sheet-multi-activity-template-rn — pure: clamp a page index into the
+ * valid range `[0, length - 1]` for a list of length `length` (design.md D5).
+ * `length <= 0` (empty `activities`) clamps to `0` — matches {@link
+ * DefaultPlayerTemplate.currentActivity} reading `activities[0]` naturally being
+ * `undefined` → `null`. Non-finite input (`NaN` / `±Infinity`) clamps to `0`
+ * rather than propagating; this is a UI page index, not a network request, so it
+ * MUST NOT throw. `Math.trunc` tolerates a non-integer input. Exported so unit
+ * tests can exercise it without constructing a `DefaultPlayerTemplate`
+ * (docs/unit-test-discipline.md — pure-function extraction).
+ */
+export function clampActivityPageIndex(index: number, length: number): number {
+  if (length <= 0) return 0;
+  if (!Number.isFinite(index)) return 0;
+  return Math.min(Math.max(Math.trunc(index), 0), length - 1);
+}
+
 export class DefaultPlayerTemplate {
   private readonly effectiveConfig: EffectiveConfig;
   private readonly onDismiss?: () => void;
@@ -657,17 +674,61 @@ export class DefaultPlayerTemplate {
   private submitInFlightFlag = false;
 
   /**
-   * live-activity-entry-rn-template — the single currently-running live-shopping
-   * activity (`LBWinEntry(variant="activity")` parity floating entry / `LBActivitySheet`
-   * parity popup). `null` = no activity currently running (host hides the entry).
-   * Single value, NOT a collection — a live only ever runs one activity at a time
-   * (backend `event[]` contract + the `LBActivitySheet` design both assume this).
-   * Set by {@link handleActiveEventStarted} (push, fire-once, never clears) and
-   * {@link syncActiveEvents} (pull backfill via core `activeEvents()`; the ONLY
-   * intake path that can clear it back to `null` — see design.md D3). Reset to
-   * `null` by {@link clear} (video switch / teardown).
+   * activity-sheet-multi-activity-template-rn — the full list of currently-running
+   * live-shopping activities (backend `event[]`), in intake-arrival order (push
+   * upsert / pull snapshot overwrite — see {@link handleActiveEventStarted} /
+   * {@link syncActiveEvents}). Empty array = no activity currently running (host
+   * hides the entry, same external contract as the pre-existing `currentActivity
+   * === null`). Reset to `[]` by {@link clear} (video switch / teardown).
+   *
+   * **Design reversal (design.md D1)**: this REPLACES the prior single-value
+   * field `currentActivityValue: LBActiveEvent | null` from
+   * `live-activity-entry-rn-template` (design.md D1 there: "a live only ever runs
+   * one activity at a time"). The backend `event[]` CAN return multiple
+   * concurrently-running activities; that assumption no longer holds. See
+   * {@link currentActivity} for the back-compat single-value read surface.
    */
-  private currentActivityValue: LBActiveEvent | null = null;
+  private activitiesValue: readonly LBActiveEvent[] = [];
+
+  /**
+   * activity-sheet-multi-activity-template-rn — the page index into {@link
+   * activitiesValue} that {@link currentActivity} currently reflects. Always
+   * clamped into `[0, activitiesValue.length - 1]` (or `0` when
+   * `activitiesValue` is empty) via {@link clampActivityPageIndex} — set by
+   * {@link handleActiveEventStarted} (jumps to the pushed/updated event),
+   * {@link syncActiveEvents} (clamps only, never jumps — design.md D3), {@link
+   * setActivityPageIndex} (host-driven paging), and the video-switch cache
+   * restore in {@link setCurrentVideoId} (reset to `0`). Defaults to `0`.
+   */
+  private currentActivityPageIndexValue = 0;
+
+  /**
+   * activity-entry-video-switch-cache-and-hide-rn — instance-level, per-videoId
+   * snapshot of the {@link currentActivity} getter's value (the "currently
+   * displayed page" of {@link activitiesValue}, NOT the full list — design.md D4
+   * of activity-sheet-multi-activity-template-rn keeps this data shape
+   * unchanged), keyed by videoId. Populated by {@link clear} (the outgoing
+   * video's last-known displayed value, saved BEFORE it is wiped to `[]`) and
+   * consumed by {@link setCurrentVideoId} (restores the incoming video's value
+   * as a one-element list if this session has visited it before), so an
+   * in-place switch BACK to an already-seen video shows its (single) activity
+   * immediately instead of waiting for the next `syncActiveEvents` poll. Any
+   * OTHER activities that were concurrently running when the video was left are
+   * NOT restored from this cache — they reappear once the next
+   * `syncActiveEvents` poll lands (design.md D4 trade-off).
+   *
+   * The stored value CAN be `null` — that means "visited, and confirmed no
+   * activity was running", which is distinct from "never visited" (no map
+   * entry at all). `Map.has()` is used to tell the two apart; `.get() ?? x`
+   * would collapse them.
+   *
+   * Instance-level only — NOT persisted across `DefaultPlayerTemplate`
+   * instances (closing the player and reopening it builds a fresh instance
+   * with an empty cache; parity with this file's other unbounded
+   * instance-level maps, `AwardClaimFlow.byId` / `GoodsTracking.flagsByGpn`).
+   * Unbounded by design — see design.md D5.
+   */
+  private readonly activityByVideoId = new Map<string, LBActiveEvent | null>();
 
   constructor(params: {
     sdkConfig: SDKConfig;
@@ -1215,26 +1276,53 @@ export class DefaultPlayerTemplate {
    * `ACTIVE_EVENT_STARTED` event (fire-once, one call per activity id). Host
    * forwards it here (parity `handleWinReceived`'s host-forwards-event
    * convention — the RN template never subscribes to SDK events itself).
-   * ONLY sets {@link currentActivity}; it MUST NOT clear it — `ACTIVE_EVENT_STARTED`
-   * is an「activity started」notice with no paired「activity ended」push (design.md D3).
+   * MUST NOT clear {@link activitiesValue} — `ACTIVE_EVENT_STARTED` is an
+   * 「activity started」notice with no paired「activity ended」push (design.md D3
+   * of live-activity-entry-rn-template).
+   *
+   * activity-sheet-multi-activity-template-rn (design.md D2) — UPSERTS `event`
+   * into {@link activitiesValue} by `id` (an existing entry with the same id is
+   * replaced in place, preserving its position; otherwise `event` is appended)
+   * rather than overwriting the whole list, since two DIFFERENT activities can
+   * each fire their own `ACTIVE_EVENT_STARTED` while both are running. Either
+   * way, {@link currentActivityPageIndexValue} JUMPS to the pushed/updated
+   * event's resulting index — this preserves the pre-existing "fire-once push
+   * makes the new activity immediately visible" behaviour under the new
+   * list-backed model (a deliberate choice — see design.md D2).
    */
   handleActiveEventStarted(event: LBActiveEvent): void {
-    this.currentActivityValue = event;
+    const idx = this.activitiesValue.findIndex((e) => e.id === event.id);
+    this.activitiesValue =
+      idx >= 0
+        ? this.activitiesValue.map((e, i) => (i === idx ? event : e))
+        : [...this.activitiesValue, event];
+    this.currentActivityPageIndexValue = idx >= 0 ? idx : this.activitiesValue.length - 1;
     this.notifyChange();
   }
 
   /**
    * live-activity-entry-rn-template — pull-side intake backfilling
-   * {@link currentActivity} from the core `activeEvents()` accessor snapshot.
+   * {@link activitiesValue} from the core `activeEvents()` accessor snapshot.
    * Host calls this after awaiting `activeEvents()` (e.g. on mount / video
-   * switch) to close the late-subscriber blind spot for hosts that missed the
-   * fire-once `ACTIVE_EVENT_STARTED` push. Takes `events[0]` (non-empty array)
-   * or `null` (empty array) — an empty array means the activity has ended and
-   * is no longer returned by the backend `event[]`. This is the ONLY intake
-   * path that can clear {@link currentActivity} back to `null` (design.md D3).
+   * switch, or the existing periodic ~5s poll) to close the late-subscriber
+   * blind spot for hosts that missed the fire-once `ACTIVE_EVENT_STARTED` push.
+   * This is the ONLY intake path that can clear {@link currentActivity} back to
+   * `null` (design.md D3 of live-activity-entry-rn-template).
+   *
+   * activity-sheet-multi-activity-template-rn (design.md D3) — stores the
+   * **entire** `events` snapshot (no longer just `events[0]`). When the list
+   * length changes, {@link currentActivityPageIndexValue} is CLAMPED into the
+   * new valid range via {@link clampActivityPageIndex} — but deliberately
+   * NEVER jumped (unlike {@link handleActiveEventStarted}): this is a passive
+   * periodic-poll backfill, not a "new activity" notice, so it must not yank
+   * the host away from the page it is currently browsing.
    */
   syncActiveEvents(events: readonly LBActiveEvent[]): void {
-    this.currentActivityValue = events[0] ?? null;
+    this.activitiesValue = events;
+    this.currentActivityPageIndexValue = clampActivityPageIndex(
+      this.currentActivityPageIndexValue,
+      events.length,
+    );
     this.notifyChange();
   }
 
@@ -1407,15 +1495,66 @@ export class DefaultPlayerTemplate {
   }
 
   /**
-   * live-activity-entry-rn-template — the currently-running live-shopping
-   * activity, or `null` when none is running. Host binds this to decide whether
-   * to show the「活動」floating entry (`LBWinEntry(variant="activity")` parity)
-   * and, when open, what {@link LBActiveEvent} fields (`title` / `keyword` /
-   * `award` / …) to render in the `LBActivitySheet` popup. Re-read on each
-   * {@link subscribe} notification, same contract as {@link unclaimedCount}.
+   * live-activity-entry-rn-template — the currently DISPLAYED-page live-shopping
+   * activity, or `null` when {@link activities} is empty. Host binds this to
+   * decide whether to show the「活動」floating entry (`LBWinEntry(variant=
+   * "activity")` parity) and, when open, what {@link LBActiveEvent} fields
+   * (`title` / `keyword` / `award` / …) to render in the `LBActivitySheet`
+   * popup. Re-read on each {@link subscribe} notification, same contract as
+   * {@link unclaimedCount}.
+   *
+   * activity-sheet-multi-activity-template-rn (design.md D1) — signature is
+   * UNCHANGED (`LBActiveEvent | null`), but it is now DERIVED from
+   * {@link activities} / {@link currentActivityPageIndex} rather than being an
+   * independently-set field, so existing readers ({@link joinEvent},
+   * {@link activityByVideoId} video-switch cache, existing reference-ui
+   * bindings) do not need to change — it now reflects "the activity on the
+   * page the host is currently viewing" instead of always "the first one".
    */
   get currentActivity(): LBActiveEvent | null {
-    return this.currentActivityValue;
+    return this.activitiesValue[this.currentActivityPageIndexValue] ?? null;
+  }
+
+  /**
+   * activity-sheet-multi-activity-template-rn — the full list of currently-
+   * running live-shopping activities (backend `event[]`), in intake-arrival
+   * order. Host binds this + {@link currentActivityPageIndex} to draw a paged
+   * `LBActivitySheet` when more than one activity is running concurrently.
+   * Empty array = no activity running (same external meaning as the
+   * pre-existing `currentActivity === null` contract). Re-read on each
+   * {@link subscribe} notification.
+   */
+  get activities(): readonly LBActiveEvent[] {
+    return this.activitiesValue;
+  }
+
+  /**
+   * activity-sheet-multi-activity-template-rn — the page index into
+   * {@link activities} that {@link currentActivity} currently reflects. Always
+   * within `[0, activities.length - 1]` (or `0` when `activities` is empty —
+   * see {@link clampActivityPageIndex}). Defaults to `0`.
+   */
+  get currentActivityPageIndex(): number {
+    return this.currentActivityPageIndexValue;
+  }
+
+  /**
+   * activity-sheet-multi-activity-template-rn — host-driven page switch
+   * (paging dots / swipe gesture) for the `LBActivitySheet` popup, when
+   * {@link activities} holds more than one concurrently-running activity.
+   * `index` is clamped into the valid range via {@link clampActivityPageIndex}
+   * — out-of-range / negative / non-finite inputs are silently absorbed, MUST
+   * NOT throw. Diff-then-notify (design.md D6): fires ONE notification only
+   * when the clamped index actually differs from the current one (repeated
+   * calls with the same effective index, or any call while {@link activities}
+   * has 0 or 1 entries — every index clamps to `0` — are silent no-ops).
+   */
+  setActivityPageIndex(index: number): void {
+    const next = clampActivityPageIndex(index, this.activitiesValue.length);
+    if (next !== this.currentActivityPageIndexValue) {
+      this.currentActivityPageIndexValue = next;
+      this.notifyChange();
+    }
   }
 
   /**
@@ -1759,13 +1898,35 @@ export class DefaultPlayerTemplate {
 
   /**
    * 由統一 `VIDEO_OPEN` 事件的 `video_id` 追蹤當前影片短碼（cart-add-tier2-unify）。
-   * 串接進 `addToCart` → `CartAddRequest.videoId`。pure assignment（不通知，無像素影響）；
-   * 由 `TemplateAttachment.routeEvent` 的 `VIDEO_OPEN` case 呼叫（RN 無 ingestChannel）。
-   * 空字串 / 非字串 → 不覆寫（fail-safe）。
+   * 串接進 `addToCart` → `CartAddRequest.videoId`。原本是 pure assignment（不通知，無
+   * 像素影響）；由 `TemplateAttachment.routeEvent` 的 `VIDEO_OPEN` case 呼叫（RN 無
+   * ingestChannel）。空字串 / 非字串 → 不覆寫（fail-safe）。
+   *
+   * activity-entry-video-switch-cache-and-hide-rn — 新增一條例外路徑：videoId 更新後，
+   * 若 {@link activityByVideoId} 對這支影片有快取紀錄（本 session 曾經造訪過，`.has()`
+   * 而非只看值真假 — 快取值本身可以是 `null`，代表「造訪過、當時確認無活動」），立即
+   * 把顯示還原為該快取值，不需等待下一輪 `syncActiveEvents` 輪詢。diff-then-notify：
+   * 只在還原值與目前 {@link currentActivity} 不同時才 `notifyChange()`。快取內沒有這
+   * 支影片的紀錄（本 session 第一次造訪）→ 維持 `clear()` 已設定的空清單，不通知。
+   *
+   * activity-sheet-multi-activity-template-rn (design.md D4) — the cache still
+   * stores a SINGLE `LBActiveEvent | null` snapshot (unchanged data shape); a
+   * hit restores {@link activitiesValue} as a ONE-element list (`[restored]`)
+   * or `[]`, with {@link currentActivityPageIndexValue} reset to `0`. Any OTHER
+   * activities concurrently running when this video was left are NOT restored
+   * here — they reappear once the next `syncActiveEvents` poll lands.
    */
   setCurrentVideoId(videoId: string | null | undefined): void {
     if (typeof videoId === 'string' && videoId.length > 0) {
       this.currentVideoIdValue = videoId;
+      if (this.activityByVideoId.has(videoId)) {
+        const restored = this.activityByVideoId.get(videoId) ?? null;
+        if (restored !== this.currentActivity) {
+          this.activitiesValue = restored != null ? [restored] : [];
+          this.currentActivityPageIndexValue = 0;
+          this.notifyChange();
+        }
+      }
     }
   }
 
@@ -1955,9 +2116,25 @@ export class DefaultPlayerTemplate {
   clear(): void {
     this.feed.clear();
     this.unclaimed.clear();
+    // activity-entry-video-switch-cache-and-hide-rn — snapshot the OUTGOING
+    // video's currently-DISPLAYED activity (the `currentActivity` getter — a
+    // single value, activity-sheet-multi-activity-template-rn design.md D4
+    // keeps the cache's data shape unchanged) into the per-videoId cache
+    // BEFORE wiping it below, so a later in-place switch back to this same
+    // video can restore it immediately (see setCurrentVideoId). clear() runs
+    // on VIDEO_SWITCH, strictly BEFORE VIDEO_OPEN's setCurrentVideoId advances
+    // currentVideoIdValue to the incoming id — so it still holds the
+    // outgoing id here, and `this.currentActivity` still reflects the
+    // outgoing video's activities/page (read BEFORE they are reset below).
+    if (this.currentVideoIdValue != null) {
+      this.activityByVideoId.set(this.currentVideoIdValue, this.currentActivity);
+    }
     // live-activity-entry-rn-template — a video switch / teardown must not leak
     // the previous video's activity into the next one.
-    this.currentActivityValue = null;
+    // activity-sheet-multi-activity-template-rn — reset the full list + page,
+    // not just a single value (design.md D1).
+    this.activitiesValue = [];
+    this.currentActivityPageIndexValue = 0;
     this.latestClaimResult = null;
     this.lastSubmittedWinnerId = null;
     // win-claim-email-submit-rn-template: 換片 / teardown 一併結束領獎 in-flight（含
