@@ -425,6 +425,21 @@ export interface PlayerTemplateAttachment {
    * route B AND the detail sheet (avoid the double-write).
    */
   setHostOwnsCart(owns: boolean): void;
+  /**
+   * 把一個原始 SDK 事件轉發進這個 attachment 的內部路由(與這個 attachment 自己經
+   * core `registerListener` 收到事件時的處理**完全等價**——底層都是同一個
+   * `routeEvent(template, event)`)。
+   *
+   * 用途:當這個 attachment 自己的 core 單槽註冊被另一個呼叫端(典型情境:稍後掛載的
+   * reference-ui drop-in 容器)取代、不再收到任何事件時,讓「目前實際持有 core 單槽」的那個
+   * 呼叫端把它收到的事件轉發進來,讓這份 template 的內部狀態機(`startScreen.phase` 等)繼續推進。
+   *
+   * 呼叫端契約(呼叫端自行負責,本方法不做防重放):同一個 `LBSdkEvent` 對同一個 attachment
+   * MUST 恰好送達一次——要嘛經這個 attachment 自己的 core 註冊、要嘛經這裡轉發,兩者 MUST NOT
+   * 同時發生於同一個事件(部分路由分支非冪等,如 `VIDEO_SWITCH` → `template.clear()`,重放
+   * 會造成非預期的狀態重置)。
+   */
+  handleEvent(event: LBSdkEvent): void;
   /** Detach the unified listener. Call on host unmount. Idempotent. */
   detach(): void;
 }
@@ -766,6 +781,9 @@ export function attachPlayerTemplate(
     },
     setHostOwnsCart(owns: boolean): void {
       template.setHostOwnsCart(owns);
+    },
+    handleEvent(event: LBSdkEvent): void {
+      routeEvent(template, event);
     },
     detach(): void {
       if (detached) return;

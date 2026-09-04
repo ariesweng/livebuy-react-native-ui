@@ -22,6 +22,7 @@ import { ActivityTier, MergedActivityFeed, PRODUCT_PUSH_COLOR } from './Activity
 import { PlayerErrorStateModel, type PlayerErrorState } from './ErrorState';
 import {
   DefaultStartScreenState,
+  StartScreenPhase,
   DefaultEndScreenState,
   DefaultProductOverlayState,
   DefaultPlayerHeaderState,
@@ -431,6 +432,44 @@ export class DefaultPlayerTemplate {
   private readonly playerHeader = new DefaultPlayerHeaderState();
   private readonly playbackProgress = new DefaultPlaybackProgressState();
   private readonly subtitle = new DefaultSubtitleState();
+
+  /**
+   * suppress-product-overlay-during-intro-rn-template — the latest REAL
+   * products / activeProduct handed to {@link handleMomentSnapshot} (the
+   * underlying buffer, distinct from what {@link productOverlay} currently
+   * EXPOSES). Retained even while the opening MP4 preroll is playing
+   * (StartScreen {@link StartScreenPhase.Splash} phase) so the ProductOverlay
+   * view-model can be restored the INSTANT intro playback ends — via
+   * {@link applyProductOverlay}, called from {@link handlePlayerStateChange} /
+   * {@link handleUpcoming} — without waiting for the next host-fed moment
+   * snapshot or re-fetching from the API. Parity iOS / Android (same bug, same
+   * fix shape — RN template-layer landing only; this file's scope is
+   * `react-native-ui`). Reset by {@link clear}.
+   */
+  private bufferedOverlayProducts: readonly LBProduct[] = [];
+  private bufferedOverlayActiveProduct: LBProduct | null = null;
+
+  /**
+   * suppress-product-overlay-during-intro-rn-template — forward the buffered
+   * real products/activeProduct into {@link productOverlay}, EXCEPT while the
+   * opening MP4 (`channel.start`) is playing: core is correct (RN already
+   * derives the equivalent of iOS/Android `startScreenActive` as
+   * {@link StartScreenPhase.Splash}), but `handleMomentSnapshot` previously
+   * forwarded products unconditionally, making a product card appear OVER the
+   * intro video. While `this.startScreen.phase === Splash`, the EXPOSED
+   * ProductOverlay view-model is forced to the empty/null shape; the
+   * underlying buffer is left untouched (no data loss, no re-fetch needed on
+   * restore). Returns whether the EXPOSED view-model actually changed
+   * (diff-then-notify, delegated to
+   * {@link DefaultProductOverlayState.handleSnapshot}). @internal
+   */
+  private applyProductOverlay(): boolean {
+    const introPlaying = this.startScreen.phase === StartScreenPhase.Splash;
+    return this.productOverlay.handleSnapshot(
+      introPlaying ? [] : this.bufferedOverlayProducts,
+      introPlaying ? null : this.bufferedOverlayActiveProduct,
+    );
+  }
 
   /**
    * upcoming-intro-template-rn — host-bindable Upcoming (直播預告 awaiting-live)
@@ -864,6 +903,12 @@ export class DefaultPlayerTemplate {
     this.lastState = state;
     let changed = this.errorState.handleStateChange(state);
     if (this.startScreen.handleStateChange(state)) changed = true;
+    // suppress-product-overlay-during-intro-rn-template — the StartScreen phase
+    // may have just entered/left splash (the opening MP4); re-derive what
+    // ProductOverlay exposes so leaving intro restores the buffered real
+    // snapshot IMMEDIATELY (no waiting for the next handleMomentSnapshot / a
+    // re-poll), and entering intro suppresses it just as promptly.
+    if (this.applyProductOverlay()) changed = true;
     // end-screen-no-countdown — the end screen is visible ⟺ the player is in the
     // `endScreenShown` sub-state (the native core enters it on live end REGARDLESS
     // of next/hot, #3). RN does NOT bridge momentState, so endScreenVisible is
@@ -943,7 +988,13 @@ export class DefaultPlayerTemplate {
       changed = true;
     }
     if (snapshot.products !== undefined || snapshot.activeProduct !== undefined) {
-      if (this.productOverlay.handleSnapshot(snapshot.products ?? this.productOverlay.products, snapshot.activeProduct ?? null)) {
+      // suppress-product-overlay-during-intro-rn-template — buffer the REAL
+      // snapshot (fallback reads the buffer, NOT `this.productOverlay.products`,
+      // which may currently be forced empty by intro suppression) and let
+      // applyProductOverlay() decide what to actually expose.
+      this.bufferedOverlayProducts = snapshot.products ?? this.bufferedOverlayProducts;
+      this.bufferedOverlayActiveProduct = snapshot.activeProduct ?? null;
+      if (this.applyProductOverlay()) {
         changed = true;
       }
       // minicart-peek-add-only (tmpl-ios-remove-minicart-peek-fallback): the
@@ -1024,6 +1075,10 @@ export class DefaultPlayerTemplate {
     // Re-apply the StartScreen splash with the fresh channel.start (parity 4788fae).
     if (this.startScreen.setStartAvailability(hasStart)) changed = true;
     if (this.startScreen.handleStateChange(this.lastState)) changed = true;
+    // suppress-product-overlay-during-intro-rn-template — a late-arriving
+    // `channel.start` can flip the StartScreen phase here too (see the comment
+    // above); keep ProductOverlay's exposed value in lockstep.
+    if (this.applyProductOverlay()) changed = true;
     const upcomingChannel = isUpcomingChannel(channel.liveStatus, channel.type ?? -1);
     const next = {
       active: this.lastState === 'awaitingLive',
@@ -2147,6 +2202,11 @@ export class DefaultPlayerTemplate {
     this.startScreen.clear();
     this.endScreen.clear();
     this.productOverlay.clear();
+    // suppress-product-overlay-during-intro-rn-template — the underlying
+    // real-snapshot buffer must not leak into the next video / linger past
+    // teardown (design.md D4).
+    this.bufferedOverlayProducts = [];
+    this.bufferedOverlayActiveProduct = null;
     this.playerHeader.clear();
     this.playbackProgress.clear();
     this.subtitle.clear();
