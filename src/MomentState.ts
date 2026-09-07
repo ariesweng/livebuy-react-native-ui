@@ -494,6 +494,15 @@ export class DefaultProductOverlayState {
    * computed (no second state). The reference-ui product LIST binds THIS so the
    * introducing item sorts first — ORDERING is a data-layer responsibility;
    * reference-ui MUST NOT re-sort. Parity iOS / Android `productsIntroducingFirst`.
+   *
+   * NOTE (rn-vod-product-list-introducing-order-template): this getter stays
+   * narrow by design — it only ever sees `products` / `activeProduct`, so it is
+   * ONLY the LIVE half of the story. The VOD/replay half (reordering by
+   * `vodActiveProducts`, which needs `playbackProgress` + `playerHeader`, both
+   * OUTSIDE this class) is composed one level up, in
+   * `DefaultPlayerTemplate.productsIntroducingFirstCombined` (`DefaultTemplate.ts`)
+   * — that is what `productOverlayState.productsIntroducingFirst` actually
+   * returns to hosts, not this getter directly.
    */
   get productsIntroducingFirst(): readonly LBProduct[] {
     const id = this._activeProduct?.id;

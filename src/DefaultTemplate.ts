@@ -1663,15 +1663,65 @@ export class DefaultPlayerTemplate {
   /**
    * ProductOverlay snapshot — `products` + the narrate_status==2 `activeProduct`,
    * plus the pure-derived `introducingProductId` / `productsIntroducingFirst`
-   * (介紹中商品排第一；parity iOS / Android).
+   * (介紹中商品排第一；parity iOS / Android). `productsIntroducingFirst` is sourced
+   * from {@link productsIntroducingFirstCombined} (rn-vod-product-list-introducing-
+   * order-template) rather than `this.productOverlay.productsIntroducingFirst`
+   * directly, so VOD/replay is ALSO covered (see that getter's doc).
    */
   get productOverlayState(): ProductOverlayState {
     return {
       products: this.productOverlay.products,
       activeProduct: this.productOverlay.activeProduct,
       introducingProductId: this.productOverlay.introducingProductId,
-      productsIntroducingFirst: this.productOverlay.productsIntroducingFirst,
+      productsIntroducingFirst: this.productsIntroducingFirstCombined,
     };
+  }
+
+  /**
+   * `productsIntroducingFirst` combining LIVE and VOD/replay ordering
+   * (rn-vod-product-list-introducing-order-template, design.md D1/D2/D3). The
+   * integration point lives HERE (in `DefaultPlayerTemplate`) rather than in
+   * `DefaultProductOverlayState` (`MomentState.ts`) because only this class sees
+   * all three sibling sub-states this needs (`productOverlay` / `playbackProgress`
+   * via {@link vodActiveProducts} / `playerHeader`); `DefaultProductOverlayState`
+   * is a deliberately narrow view-model (mirrors `PlayerErrorStateModel`) that only
+   * knows `products` / `activeProduct` and MUST stay that way.
+   *
+   * Branch selection (design.md D2) is via EXPLICIT flags, not merely "is
+   * `vodActiveProducts` non-empty" (a LIVE product MAY carry `beginTime`/`endTime`
+   * too, so that alone would misfire during LIVE):
+   *   1. `productOverlay.activeProduct != null` → LIVE branch: delegate to the
+   *      existing `DefaultProductOverlayState.productsIntroducingFirst` UNCHANGED.
+   *      `activeProduct` is core-fed and is ALWAYS `null` for VOD / finished-live
+   *      replay, so this check alone is LIVE-priority AND back-compat with
+   *      call-sites that never feed `isLive` (existing tests).
+   *   2. Else if `playerHeader.current.isLive === true` (LIVE in progress, nothing
+   *      currently narrating) → unchanged `products` order — MUST NOT reorder via
+   *      `vodActiveProducts` even if some product's window happens to cover the
+   *      playhead.
+   *   3. Else (confirmed non-LIVE — VOD `type===1` or finished-live replay, both
+   *      `isLive === false`) → move ALL of `vodActiveProducts` (already
+   *      `[beginTime,endTime)`-filtered + beginTime-ascending sorted; reused
+   *      VERBATIM, no re-derivation) to the front preserving their relative order,
+   *      followed by the rest of `products` in original relative order. Empty
+   *      `vodActiveProducts` leaves `products` unchanged (parity with the
+   *      pre-existing "no active product → unchanged order" contract).
+   *
+   * Pure computed (no new state). reference-ui (`ProductSheetsModel.ts`) MUST NOT
+   * re-sort — ordering stays a data-layer responsibility.
+   */
+  private get productsIntroducingFirstCombined(): readonly LBProduct[] {
+    if (this.productOverlay.activeProduct != null) {
+      return this.productOverlay.productsIntroducingFirst;
+    }
+    if (this.playerHeader.current.isLive) {
+      return this.productOverlay.products;
+    }
+    const active = this.vodActiveProducts;
+    if (active.length === 0) return this.productOverlay.products;
+    const activeIds = new Set(active.map((p) => p.id));
+    const rest = this.productOverlay.products.filter((p) => !activeIds.has(p.id));
+    return [...active, ...rest];
   }
 
   /**
