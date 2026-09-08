@@ -644,6 +644,16 @@ export class DefaultPlayerTemplate {
    */
   private _isRestricted = false;
   /**
+   * channel-derived、不分 upcoming 的通用 loading cover（parity iOS/Android
+   * `DefaultPlayerTemplate.loadingCover`；`player-loading-cover-background-template-rn`，
+   * RN #8 兩階段修復第一階段 / template 層半）。映射 `channel.cover` 逐字 passthrough，供
+   * reference-ui 在播放器 loading 期把純色底改繪成封面圖背景。與既有 upcoming-scoped
+   * {@link DefaultUpcomingState.cover}（`upcomingState.cover`）語意分離、並存。**目前未接線**：
+   * host-wiring（`TemplateAttachment` 路由 `VIDEO_OPEN`）與 reference-ui 像素繪製為後續獨立的
+   * reference-ui 層 change 範圍，本欄位在生產環境中暫為 headless-safe 死碼。預設 `''`。
+   */
+  private _loadingCover = '';
+  /**
    * §1 — 置頂留言（chat-message-taxonomy ⑤），由 {@link handlePollReceived} 從 `poll.top` 設定，
    * 供 reference-ui 渲染。冪等：每輪以當前釘選狀態覆蓋，取消釘選 → null。
    */
@@ -1678,9 +1688,11 @@ export class DefaultPlayerTemplate {
   }
 
   /**
-   * `productsIntroducingFirst` combining LIVE and VOD/replay ordering
-   * (rn-vod-product-list-introducing-order-template, design.md D1/D2/D3). The
-   * integration point lives HERE (in `DefaultPlayerTemplate`) rather than in
+   * `productsIntroducingFirst` combining LIVE and finished-live-replay ordering,
+   * excluding pure VOD (rn-vod-product-list-introducing-order-exclude-vod-template,
+   * design.md D1/D2/D3; supersedes the VOD-inclusive
+   * rn-vod-product-list-introducing-order-template behavior). The integration point
+   * lives HERE (in `DefaultPlayerTemplate`) rather than in
    * `DefaultProductOverlayState` (`MomentState.ts`) because only this class sees
    * all three sibling sub-states this needs (`productOverlay` / `playbackProgress`
    * via {@link vodActiveProducts} / `playerHeader`); `DefaultProductOverlayState`
@@ -1699,13 +1711,18 @@ export class DefaultPlayerTemplate {
    *      currently narrating) → unchanged `products` order — MUST NOT reorder via
    *      `vodActiveProducts` even if some product's window happens to cover the
    *      playhead.
-   *   3. Else (confirmed non-LIVE — VOD `type===1` or finished-live replay, both
-   *      `isLive === false`) → move ALL of `vodActiveProducts` (already
-   *      `[beginTime,endTime)`-filtered + beginTime-ascending sorted; reused
-   *      VERBATIM, no re-derivation) to the front preserving their relative order,
-   *      followed by the rest of `products` in original relative order. Empty
-   *      `vodActiveProducts` leaves `products` unchanged (parity with the
-   *      pre-existing "no active product → unchanged order" contract).
+   *   3. Else if `playerHeader.current.isFinishedLiveReplay === false` (confirmed
+   *      pure VOD, `type===1`) → unchanged `products` order. Pure VOD MUST NOT be
+   *      pinned even when `vodActiveProducts` is non-empty — 2026-09-07 user
+   *      decision, aligning with `design/templates/minimal/screens.jsx`
+   *      `ProductListSheet` which only ever reorders when `live=true`.
+   *   4. Else (confirmed finished-live replay, `isFinishedLiveReplay === true`) →
+   *      move ALL of `vodActiveProducts` (already `[beginTime,endTime)`-filtered +
+   *      beginTime-ascending sorted; reused VERBATIM, no re-derivation) to the
+   *      front preserving their relative order, followed by the rest of `products`
+   *      in original relative order. Empty `vodActiveProducts` leaves `products`
+   *      unchanged (parity with the pre-existing "no active product → unchanged
+   *      order" contract).
    *
    * Pure computed (no new state). reference-ui (`ProductSheetsModel.ts`) MUST NOT
    * re-sort — ordering stays a data-layer responsibility.
@@ -1715,6 +1732,9 @@ export class DefaultPlayerTemplate {
       return this.productOverlay.productsIntroducingFirst;
     }
     if (this.playerHeader.current.isLive) {
+      return this.productOverlay.products;
+    }
+    if (!this.playerHeader.current.isFinishedLiveReplay) {
       return this.productOverlay.products;
     }
     const active = this.vodActiveProducts;
@@ -1993,6 +2013,27 @@ export class DefaultPlayerTemplate {
   applyRestriction(restricted: boolean): void {
     if (this._isRestricted === restricted) return;
     this._isRestricted = restricted;
+    this.notifyChange();
+  }
+
+  /**
+   * channel-derived、不分 upcoming 的通用 loading cover（`player-loading-cover-background-template-rn`）。
+   * reference-ui 讀此值在播放器 loading 期把純色底改繪成封面圖背景（實際像素繪製為後續獨立的
+   * reference-ui 層 change 範圍）。預設 `''`。
+   */
+  get loadingCover(): string {
+    return this._loadingCover;
+  }
+
+  /**
+   * host-fed setter，逐字 passthrough `cover` 字串（template MUST NOT 載入圖片）。diff-then-notify：
+   * 值變更才 `notifyChange()`，parity 既有 {@link applyRestriction} 的寫法。**目前未接線**——
+   * `TemplateAttachment` 尚未在任何 event 路由呼叫此方法（headless-safe 死碼，待後續 reference-ui
+   * 層 change 接線）。
+   */
+  applyLoadingCover(cover: string): void {
+    if (this._loadingCover === cover) return;
+    this._loadingCover = cover;
     this.notifyChange();
   }
 

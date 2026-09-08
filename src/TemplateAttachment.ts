@@ -467,10 +467,18 @@ function routeEvent(template: DefaultPlayerTemplate, event: LBSdkEvent): void {
       // `chatEnabled` (`live_status === 1 && guest_comment === 1`) so a backend「開啟訪客留言」change
       // enables the guest's chat WITHOUT a re-enter. Guarded on presence so an older native (no
       // field) never clobbers the rail. Idempotent (diff-then-notify in the template).
+      //
+      // guest-edit-available-poll-derive-template-rn — the SAME `guest_comment` value also drives
+      // `guestEditAvailable` (Guest-rename allowed). Its formula is DELIBERATELY narrower than
+      // `chatEnabled`'s (`guest_comment === 1` only, no `live_status` gate) — mirrors iOS
+      // `DefaultPlayerTemplate.ingestChannel`'s formula for this flag. Reuses the SAME presence guard
+      // (single data source) and folds into the SAME `handleRailEnablement` call (per-field partial
+      // merge — does not clobber `subtitleAvailable` / `serviceLinkAvailable` / `hasStart`).
       if (params.guest_comment !== undefined) {
         const chatEnabled =
           Number(params.live_status) === 1 && Number(params.guest_comment) === 1;
-        template.handleRailEnablement({ chatEnabled });
+        const guestEditAvailable = Number(params.guest_comment) === 1;
+        template.handleRailEnablement({ chatEnabled, guestEditAvailable });
       }
       // 問題5 — the native core relays the CURRENT channel `notice` / `sys_notice` on every
       // POLL_RECEIVED (live-notice-poll-relay-core). Ingest it so the LIVE 公告 banner / notice tab
@@ -629,6 +637,17 @@ function routeEvent(template: DefaultPlayerTemplate, event: LBSdkEvent): void {
       template.setCurrentVideoId(
         typeof params.video_id === 'string' ? params.video_id : null,
       );
+      // swipe-nav-video-open-wiring — VIDEO_OPEN additively carries
+      // `prev_video_id`/`next_video_id` (video-open-prev-next-bridge-core; key
+      // omitted, not null, when there is no adjacent video in that direction).
+      // RN has no ingestChannel, so this is the sole feed for the adjacent-video
+      // swipe-navigate targets; tolerant cast matches `video_id` above (non-string
+      // / missing → null). Purely additive: does not change handleNavTargets /
+      // DefaultPlayerNavigation, just adds this call site as one more caller.
+      template.handleNavTargets({
+        prevVideoId: typeof params.prev_video_id === 'string' ? params.prev_video_id : null,
+        nextVideoId: typeof params.next_video_id === 'string' ? params.next_video_id : null,
+      });
       break;
     default:
       // Every other event is the host's own listener's responsibility; the
