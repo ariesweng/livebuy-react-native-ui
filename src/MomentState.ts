@@ -139,6 +139,13 @@ export interface PlayerHeaderState {
    *  下游（host app 自組的 reference-ui）讀此把回放渲染成 LIVE 版型 + 「聊天室已關閉」留言態；純
    *  VOD（`type === 1`）兩旗標皆 `false` → VOD 版型。Default `false`. parity iOS/Android. */
   readonly isFinishedLiveReplay: boolean;
+  /** 限時搶購（flash sale）旗標 — host-fed passthrough of `channel.isFlashSale`（wire key
+   *  `is_flash_sale`，已由 core RN bridge `channel-flash-sale-flag-core-rn` 的
+   *  `mapPlayerChannelInfo` / `coerceIsFlashSale` 容錯轉換為 boolean，missing/null → `false`）。
+   *  純資料 passthrough — 與 [isLive] / [isFinishedLiveReplay] 語意獨立、不互斥（任何播放型態
+   *  理論上都可能是限時搶購）。下游（host app 自組的 reference-ui）讀此加繪促銷徽章 / chrome；
+   *  template 本身 MUST NOT 對這個旗標做任何 UI 決策。Default `false`. */
+  readonly isFlashSale: boolean;
 }
 
 /**
@@ -567,6 +574,9 @@ export class DefaultPlayerHeaderState {
   // 回放（已結束直播）flag — host-fed (`type === 3 || (type === 2 && liveStatus === 3)`). 與 _isLive
   // 並列、語意分離、互斥。下游 host 讀此把回放渲染成 LIVE 版型 + 「聊天室已關閉」留言態。Default false.
   private _isFinishedLiveReplay = false;
+  // 限時搶購（flash sale）flag — host-fed passthrough of channel.isFlashSale（channel-flash-sale-
+  // flag-template-rn）。與 _isLive / _isFinishedLiveReplay 語意獨立、不互斥。Default false.
+  private _isFlashSale = false;
 
   get current(): PlayerHeaderState {
     return {
@@ -579,6 +589,7 @@ export class DefaultPlayerHeaderState {
       shareUrl: this._shareUrl,
       isLive: this._isLive,
       isFinishedLiveReplay: this._isFinishedLiveReplay,
+      isFlashSale: this._isFlashSale,
     };
   }
 
@@ -607,6 +618,7 @@ export class DefaultPlayerHeaderState {
     shareUrl?: string;
     isLive?: boolean;
     isFinishedLiveReplay?: boolean;
+    isFlashSale?: boolean;
   }): boolean {
     let changed = false;
     if (fields.title !== undefined && this._title !== fields.title) {
@@ -636,6 +648,10 @@ export class DefaultPlayerHeaderState {
       this._isFinishedLiveReplay = fields.isFinishedLiveReplay;
       changed = true;
     }
+    if (fields.isFlashSale !== undefined && this._isFlashSale !== fields.isFlashSale) {
+      this._isFlashSale = fields.isFlashSale;
+      changed = true;
+    }
     return changed;
   }
 
@@ -662,7 +678,8 @@ export class DefaultPlayerHeaderState {
       this._shopLogo.length === 0 &&
       this._shareUrl.length === 0 &&
       !this._isLive &&
-      !this._isFinishedLiveReplay
+      !this._isFinishedLiveReplay &&
+      !this._isFlashSale
     ) {
       return false;
     }
@@ -675,6 +692,7 @@ export class DefaultPlayerHeaderState {
     this._shareUrl = '';
     this._isLive = false;
     this._isFinishedLiveReplay = false;
+    this._isFlashSale = false;
     return true;
   }
 }

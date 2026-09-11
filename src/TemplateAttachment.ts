@@ -10,7 +10,14 @@ import type { LBSideRailEnablement } from './OperationRail';
 import { LBInfoPanelTab } from './InfoTab';
 import type { CartAddRequester } from './ProductSheet';
 import type { LBWidgetSnapshot, LBWidgetSettingsInput } from './WidgetContent';
-import type { SDKConfig, LBSdkEvent, LBEventHandler, LBWinner, LBProduct } from 'livebuy-react-native';
+import type {
+  SDKConfig,
+  LBSdkEvent,
+  LBEventHandler,
+  LBWinner,
+  LBProduct,
+  LBReplayChatComment,
+} from 'livebuy-react-native';
 
 // MARK: - livebuy-ui-event-wiring-template — RN attach wiring (design D3)
 //
@@ -94,6 +101,11 @@ const ROUTED = {
   // ({ video_id, title, is_restriction }); the template derives `isRestricted` from
   // the soft display-gate flag (RN has NO ingestChannel, so this is the channel feed).
   VIDEO_OPEN: 'VIDEO_OPEN',
+  // rn-replay-chat-history-reveal-template — replay (finished-live VOD) entry
+  // one-shot notification carrying the currently-revealed history-comment prefix
+  // (parity iOS `onReplayChatRevealed` / Android). Routed into the merged feed via
+  // `DefaultPlayerTemplate.handleReplayChatRevealed`.
+  CHAT_HISTORY_LOADED: 'CHAT_HISTORY_LOADED',
 } as const;
 
 /**
@@ -117,6 +129,58 @@ function decodeWinner(params: Record<string, unknown>): { winner: LBWinner; text
     },
   };
   return { winner, text: `${title} - ${awardName}` };
+}
+
+/**
+ * rn-replay-chat-history-reveal-template — decode the unified `CHAT_HISTORY_LOADED`
+ * payload's `comments` field (native shape: array of `{ text, name, color, reply,
+ * reply_color, time }`) into `LBReplayChatComment[]`. Defensive/tolerant: a
+ * non-array `comments` decodes to `[]`; each element's six fields are individually
+ * type-checked, a missing/wrong-typed field falls back to `''` (parity with the
+ * other `routeEvent` cases' lenient decoding, e.g. `decodeWinner`). Never throws.
+ *
+ * fix-rn-replay-chat-progressive-reveal-template — currently UNUSED in production:
+ * `ROUTED.CHAT_HISTORY_LOADED` no longer calls this (see that case's comment for why).
+ * Kept for the future correct caller (once the RN native bridge forwards the
+ * progressive `onReplayChatRevealed` seam) to reuse — the six-field decode shape is
+ * unrelated to which event drives it.
+ */
+function decodeReplayChatComments(comments: unknown): LBReplayChatComment[] {
+  if (!Array.isArray(comments)) return [];
+  const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+  return comments.map((row) => {
+    const r = row as Record<string, unknown>;
+    return {
+      text: str(r?.text),
+      name: str(r?.name),
+      color: str(r?.color),
+      reply: str(r?.reply),
+      reply_color: str(r?.reply_color),
+      time: str(r?.time),
+    };
+  });
+}
+
+/**
+ * Derive `chatEnabled`/`guestEditAvailable` from raw channel fields (`liveStatus`
+ * + `guestComment`). This is the SINGLE source of this formula — both the
+ * `POLL_RECEIVED` case below AND the channel-load-time `handleChannelRailInfo`
+ * forwarder (rn-rail-enablement-channel-derive-template) call this, so the two
+ * call sites can never drift into two different formulas.
+ *
+ * `chatEnabled = liveStatus === 1 && guestComment === 1`; `guestEditAvailable =
+ * guestComment === 1` — DELIBERATELY narrower than `chatEnabled` (no `liveStatus`
+ * gate), mirroring iOS `DefaultPlayerTemplate.ingestChannel`'s formula for this
+ * flag (guest-edit-available-poll-derive-template-rn).
+ */
+export function deriveChatRailFlags(
+  liveStatus: number,
+  guestComment: number,
+): { chatEnabled: boolean; guestEditAvailable: boolean } {
+  return {
+    chatEnabled: liveStatus === 1 && guestComment === 1,
+    guestEditAvailable: guestComment === 1,
+  };
 }
 
 /** Invoke `fn` with the `text` string of each row in a poll bucket array. */
@@ -219,6 +283,23 @@ export interface AttachPlayerTemplateOptions {
   requestTogglePlayPause?: () => void;
   requestSeek?: (seconds: number) => void;
   requestSeekBy?: (delta: number) => void;
+  /**
+   * mute-preference-persist-across-session-rn-template — host-wired query for the
+   * wrapped native Player's actual current mute state (parity `loadVideo` /
+   * `requestSeek` — the RN template holds no player ref, so a player-bound query
+   * is injected by the host, which does: `() => playerRef.current?.isMuted() ??
+   * Promise.resolve(false)`, delegating to the core RN bridge accessor
+   * `LivebuyPlayerCoreRef.isMuted()` from `mute-preference-persist-across-session-
+   * rn-core`). When provided, `attachPlayerTemplate` seeds the presentation
+   * `muted` flag synchronously `false` (unchanged, regression-safe) and THEN,
+   * once this Promise resolves, corrects it to the resolved value — reflecting
+   * the wrapped native Player's app-session-persisted mute preference instead of
+   * an unconditional `false`. A rejection is swallowed (kept at the synchronous
+   * `false` seed, never thrown); a resolution arriving after `detach()` is
+   * discarded (no stale write to an unmounted attachment). Omitted → attach
+   * behaves exactly as before this change (no async branch at all).
+   */
+  queryIsMuted?: () => Promise<boolean>;
   /** Test seam: provide a prebuilt template instead of constructing one. */
   template?: DefaultPlayerTemplate;
   /**
@@ -293,6 +374,53 @@ export interface PlayerTemplateAttachment {
    * host accessor can wire it (past review caught a forward being missed).
    */
   handleRailEnablement(flags: Partial<LBSideRailEnablement>): void;
+  /**
+   * rn-rail-enablement-channel-derive-template — host-fed channel-load-time
+   * `chatEnabled`/`guestEditAvailable` derivation, fed from
+   * `LBPlayerChannelInfo.liveStatus` / `.guestComment` (`onChannelChange`,
+   * `rn-guest-comment-channel-bridge-core`). Internally calls
+   * {@link deriveChatRailFlags} (the SAME formula the `POLL_RECEIVED` derivation
+   * uses) then applies via the existing `handleRailEnablement` (per-field partial
+   * merge — does NOT touch `subtitleAvailable` / `serviceLinkAvailable` /
+   * `hasStart`).
+   *
+   * Fixes a false-negative gap: the native `PollManager` never starts for a
+   * finished-live replay (`liveStatus != 1`), so `POLL_RECEIVED` never fires for
+   * one — a video switch onto a replay left `chatEnabled`/`guestEditAvailable`
+   * permanently zeroed by the preceding `VIDEO_SWITCH` → `template.clear()`, with
+   * no later event able to correct it. RN has NO `ingestChannel()` (parity iOS/
+   * Android channel-load-time derivation), so the host calls this on every
+   * `onChannelChange` (parity with `handleHeaderChrome` / `handleNavTargets` —
+   * host-fed, the host owns wiring it to the player's callback).
+   */
+  handleChannelRailInfo(fields: { liveStatus: number; guestComment: number }): void;
+  /**
+   * rn-live-announce-immediate-display-template — host-fed channel-load-time
+   * `notice`/`sysNotice` (from `LBPlayerChannelInfo`, `rn-channel-notice-bridge-core`).
+   * Forwards straight into the existing, unmodified
+   * {@link DefaultPlayerTemplate.handleNoticeTexts} sink (idempotent
+   * diff-then-notify — same one the `POLL_RECEIVED` "問題5" case already
+   * calls).
+   *
+   * Fixes the same-shaped gap `live-announce-immediate-display-reference-ui-flutter`
+   * fixed on Flutter first: the LIVE announce banner / notice tab previously
+   * only appeared once the native `PollManager`'s first 5s round completed
+   * (`PollManager` only starts once `.playing`), even though `channel.notice`/
+   * `channel.sysNotice` are already known at the channel's first load. RN has
+   * NO `ingestChannel()` (parity iOS/Android channel-load-time auto-feed —
+   * iOS `DefaultPlayerTemplate.swift`'s `ingestChannel` calls
+   * `handleChannelNotices` directly), so the host calls this on every
+   * `onChannelChange` (parity with `handleChannelRailInfo`/`handleHeaderChrome`/
+   * `handleNavTargets` — host-fed, the host owns wiring it to the player's
+   * callback).
+   *
+   * Coexists with the existing `POLL_RECEIVED` → `handleNoticeTexts` path
+   * (the LIVE mid-stream announce-update mechanism, left untouched) —
+   * `handleNoticeTexts` itself is idempotent, so whichever path arrives first
+   * wins and the other becomes a no-op once the values match; neither path
+   * has priority over the other.
+   */
+  handleChannelNoticeInfo(fields: { notice: string; sysNotice: string }): void;
   /** player-chrome-template — host-wired bag-count (= `products.count`). */
   handleBagCount(count: number): void;
   /**
@@ -314,6 +442,9 @@ export interface PlayerTemplateAttachment {
     // 回放（已結束直播）flag — host-fed (`type === 3 || (type === 2 && liveStatus === 3)`,
     // 用 exported `isFinishedLiveReplay(type, liveStatus)` 計算). parity iOS/Android.
     isFinishedLiveReplay?: boolean;
+    // 限時搶購（flash sale）flag — host-fed passthrough of `channel.isFlashSale`
+    // (channel-flash-sale-flag-template-rn). 純資料 passthrough，template 不做 UI 決策.
+    isFlashSale?: boolean;
   }): void;
   /**
    * swipe-navigate-rn-template — host-fed prev/next adjacent-video ids (resolved
@@ -475,9 +606,10 @@ function routeEvent(template: DefaultPlayerTemplate, event: LBSdkEvent): void {
       // (single data source) and folds into the SAME `handleRailEnablement` call (per-field partial
       // merge — does not clobber `subtitleAvailable` / `serviceLinkAvailable` / `hasStart`).
       if (params.guest_comment !== undefined) {
-        const chatEnabled =
-          Number(params.live_status) === 1 && Number(params.guest_comment) === 1;
-        const guestEditAvailable = Number(params.guest_comment) === 1;
+        const { chatEnabled, guestEditAvailable } = deriveChatRailFlags(
+          Number(params.live_status),
+          Number(params.guest_comment),
+        );
         template.handleRailEnablement({ chatEnabled, guestEditAvailable });
       }
       // 問題5 — the native core relays the CURRENT channel `notice` / `sys_notice` on every
@@ -522,6 +654,7 @@ function routeEvent(template: DefaultPlayerTemplate, event: LBSdkEvent): void {
             name?: unknown;
             kind?: unknown;
             reply?: unknown;
+            id?: unknown;
           };
           if (typeof r?.text === 'string') {
             // color / ct / p are forwarded so handlePush can route SYSTEM / 商品推播 notices
@@ -530,6 +663,8 @@ function routeEvent(template: DefaultPlayerTemplate, event: LBSdkEvent): void {
             // (chat-nickname-display) — only ordinary user chat keeps it (system notices ignore it).
             // chat-message-taxonomy ⑤ — `kind` 判型 wire 字串（停止 color 反推）、`reply` 被回覆
             // 引用內容（主播 / AI 回覆的引用框）。核心 pollReceivedEventParams 已序列化（缺則退回 color）。
+            // rn-chat-push-id-dedupe-template — `id`（既有 wire 欄位，早已透傳、先前從未被讀取）供
+            // `handlePush` 以身分去重擋掉後端相鄰兩輪 poll 之間重送同一筆 push 造成的重複顯示。
             template.handlePush(r.text, {
               eid: typeof r.eid === 'number' ? r.eid : undefined,
               ek: typeof r.ek === 'string' ? r.ek : undefined,
@@ -542,6 +677,7 @@ function routeEvent(template: DefaultPlayerTemplate, event: LBSdkEvent): void {
               name: typeof r.name === 'string' ? r.name : undefined,
               kind: typeof r.kind === 'string' ? r.kind : undefined,
               reply: typeof r.reply === 'string' ? r.reply : undefined,
+              id: typeof r.id === 'string' ? r.id : undefined,
             });
           }
         }
@@ -649,6 +785,21 @@ function routeEvent(template: DefaultPlayerTemplate, event: LBSdkEvent): void {
         nextVideoId: typeof params.next_video_id === 'string' ? params.next_video_id : null,
       });
       break;
+    case ROUTED.CHAT_HISTORY_LOADED:
+      // fix-rn-replay-chat-progressive-reveal-template — DELIBERATE no-op. This case
+      // used to call `handleReplayChatRevealed`, but `CHAT_HISTORY_LOADED` is a native
+      // ONE-SHOT event (fires once, when all comment pages are fetched, carrying the
+      // FULL video's comments) — not the PROGRESSIVE per-tick reveal
+      // `handleReplayChatRevealed`'s reconcile logic assumes (an ever-growing prefix as
+      // playback advances). Routing the one-shot full list into it made the first call
+      // always append EVERYTHING at once (appendedCount starts at 0, so
+      // incomingCount >= appendedCount unconditionally) — the reported bug ("replay chat
+      // shows all messages instantly instead of over time"). iOS/Android never routed
+      // this event here either (they only ever consumed the native PROGRESSIVE
+      // `onReplayChatRevealed` typed callback, which the RN native bridge does not yet
+      // forward — a separate core-layer follow-up). `handleReplayChatRevealed` itself is
+      // left in place, ready for a future correct caller once that bridge exists.
+      break;
     default:
       // Every other event is the host's own listener's responsibility; the
       // template never double-processes them.
@@ -685,6 +836,12 @@ export function attachPlayerTemplate(
       requestSeekBy: options.requestSeekBy,
     });
 
+  // Declared here (moved up from its previous spot just before `attachment` is
+  // built) so the async mute-correction `.then` closure below can reference it —
+  // the guard it reads only flips to `true` once `detach()` is actually called;
+  // see `PlayerTemplateAttachment.detach()` further down for the idempotent flip.
+  let detached = false;
+
   // player-default-unmuted-template — seed the presentation mute flag = false
   // (unmuted / sound on by default), matching the core engines' default-unmuted main
   // playback (player-default-unmuted-core). momentState carries no `muted`; the host
@@ -692,13 +849,38 @@ export function attachPlayerTemplate(
   // `handleMutedChange`. Parity iOS TemplateAttachment.swift `template.handleMuted(false)`.
   // No-op for a freshly-built template given the new false default, but kept as the
   // explicit "attach = re-seed unmuted" contract so a reused `options.template`
-  // (possibly left muted) is re-seeded unmuted on attach.
+  // (possibly left muted) is re-seeded unmuted on attach. This synchronous seed
+  // runs UNCONDITIONALLY (regression-safe: identical to pre-`queryIsMuted` behavior).
   template.handleMutedChange(false);
+
+  // mute-preference-persist-across-session-rn-template — when the host wires
+  // `queryIsMuted` (a Promise-returning read of the wrapped native Player's ACTUAL
+  // current mute state, parity iOS `vc.isMuted` / Android `MutePreferenceStore
+  // .current()`), asynchronously correct the synchronous `false` seed above once it
+  // resolves. This can't be done synchronously like iOS/Android — RN template holds
+  // no player ref, and the RN bridge accessor behind `queryIsMuted` is inherently a
+  // Promise (`LivebuyPlayerCoreRef.isMuted()`, `mute-preference-persist-across-
+  // session-rn-core`). `handleMutedChange` is idempotent diff-then-notify, so a
+  // resolution matching the `false` seed is a harmless no-op; only a resolution of
+  // `true` (an inherited app-session mute preference) produces an observable change.
+  // Any rejection is swallowed (defensive — `queryIsMuted` is an arbitrary
+  // host-supplied function, `isMuted()` itself is documented to never reject) and
+  // NEVER thrown from here; a resolution arriving after `detach()` is discarded (no
+  // write to an attachment the host has already torn down).
+  if (options.queryIsMuted) {
+    options.queryIsMuted().then(
+      (muted) => {
+        if (!detached) template.handleMutedChange(muted);
+      },
+      () => {
+        // Swallow: keep the existing `false` seed, never throw / unhandled-reject.
+      },
+    );
+  }
 
   const subscribe = options.registerListener ?? defaultRegisterListener;
   const unsubscribe = subscribe((event) => routeEvent(template, event));
 
-  let detached = false;
   const attachment: PlayerTemplateAttachment = {
     template,
     subscribe(listener: ChangeListener): Unsubscribe {
@@ -726,6 +908,23 @@ export function attachPlayerTemplate(
     // forwarder lets a typed-source host drive it directly.
     handleRailEnablement(flags): void {
       template.handleRailEnablement(flags);
+    },
+    // rn-rail-enablement-channel-derive-template — channel-load-time derivation
+    // (parity with the POLL_RECEIVED case's deriveChatRailFlags call; fixes the
+    // finished-live-replay false-negative gap described on the interface JSDoc).
+    handleChannelRailInfo(fields): void {
+      const { chatEnabled, guestEditAvailable } = deriveChatRailFlags(
+        fields.liveStatus,
+        fields.guestComment,
+      );
+      template.handleRailEnablement({ chatEnabled, guestEditAvailable });
+    },
+    // rn-live-announce-immediate-display-template — channel-load-time forwarder,
+    // straight pass-through into the existing `handleNoticeTexts` sink (no
+    // derivation; parameter order matches the `POLL_RECEIVED` case — sysNotice
+    // first).
+    handleChannelNoticeInfo(fields): void {
+      template.handleNoticeTexts(fields.sysNotice, fields.notice);
     },
     handleBagCount(count: number): void {
       template.handleBagCount(count);

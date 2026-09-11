@@ -5,6 +5,7 @@ import type {
   LBAwardClaimResultParams,
   LBProduct,
   LBActiveEvent,
+  LBReplayChatComment,
 } from 'livebuy-react-native';
 // url-open-host-routing-template-rn — the URL-open verdict (core `url-open-policy-rn`).
 // Imported through the PACKAGE-SCOPED DEEP PATH on purpose (measured, see design.md D-B):
@@ -19,6 +20,7 @@ import { LBURLOpenPolicy } from 'livebuy-react-native/src/LBURLOpenPolicy';
 import { ConfigMerger } from './ConfigMerger';
 import type { LBUIOptions } from './LBUIOptions';
 import { ActivityTier, MergedActivityFeed, PRODUCT_PUSH_COLOR } from './ActivityFeed';
+import { VideoFeedSnapshotCache } from './VideoFeedSnapshotCache';
 import { PlayerErrorStateModel, type PlayerErrorState } from './ErrorState';
 import {
   DefaultStartScreenState,
@@ -395,6 +397,49 @@ export function clampActivityPageIndex(index: number, length: number): number {
   return Math.min(Math.max(Math.trunc(index), 0), length - 1);
 }
 
+// MARK: - 回放聊天 bridge（rn-replay-chat-history-reveal-template，parity iOS
+// `replayChatReconcile(incomingCount:appendedCount:)` / Android `replayChatReconcile`）.
+
+/**
+ * 回放已揭露前綴 reconcile 進合流 feed 的**純決策**（遵 docs/unit-test-discipline.md）。前綴
+ * 單調（core 一律送同一升序串的前綴）：
+ * - `incomingCount >= appendedCount`（播放前進 / 不變）→ `appendDelta`：只 append 尾段索引區間
+ *   `[appendedCount, incomingCount)`（`incomingCount === appendedCount` 為空區間 = no-op，
+ *   前進時不重建、不閃爍）。
+ * - `incomingCount < appendedCount`（seek 倒退 / 收到 `[]` 清空 / 換片）→ `rebuild`：先 clear
+ *   再重建全部 `[0, incomingCount)`（可能為空）。
+ *
+ * Parity iOS `DefaultPlayerTemplate.ReplayChatReconcile` / Android
+ * `DefaultPlayerTemplate.ReplayChatReconcile`（此處用 discriminated union 取代
+ * `enum` / `sealed interface`）。
+ */
+export type ReplayChatReconcile =
+  | { readonly kind: 'appendDelta'; readonly from: number; readonly to: number }
+  | { readonly kind: 'rebuild'; readonly to: number };
+
+/** Pure → 可單測。唯一決策點。Mirrors iOS `replayChatReconcile(incomingCount:appendedCount:)`. */
+export function replayChatReconcile(incomingCount: number, appendedCount: number): ReplayChatReconcile {
+  return incomingCount >= appendedCount
+    ? { kind: 'appendDelta', from: appendedCount, to: incomingCount }
+    : { kind: 'rebuild', to: incomingCount };
+}
+
+/**
+ * 把回放歷史 `LBReplayChatComment` 映射成 chat feed row 的角色 metadata。RN 的 wire 型別
+ * （`LivebuyEvents.ts` `LBReplayChatComment`）**不含 `kind` 欄位**（與 iOS/Android 原生
+ * `LBComment` 模型不同——那兩端的 decoder 在 wire 缺 `kind` 時才會 fallback 推導）。故這裡直接
+ * 依 `name` / `reply` 推導角色，等同於 iOS `LBComment` decoder 缺 `kind` 時的 fallback 規則：
+ * `name` 非空 → 觀眾留言（`isHost=false`）；`name` 空 + `reply` 非空 → 主播回覆
+ * （`isHost=true`，帶引用）；其餘 → 主播留言（`isHost=true`，無引用）。判定不 trim，直接比對
+ * wire 原始字串長度（`appendChat` 之後才對 `name`/`replyText` 做 trim + 正規化，這裡不重複做）。
+ * Pure / testable.
+ */
+export function replayChatRow(comment: LBReplayChatComment): { isHost: boolean; replyText?: string } {
+  if (comment.name.length > 0) return { isHost: false };
+  if (comment.reply.length > 0) return { isHost: true, replyText: comment.reply };
+  return { isHost: true };
+}
+
 export class DefaultPlayerTemplate {
   private readonly effectiveConfig: EffectiveConfig;
   private readonly onDismiss?: () => void;
@@ -682,6 +727,15 @@ export class DefaultPlayerTemplate {
   private readonly feed = new MergedActivityFeed();
 
   /**
+   * rn-replay-chat-history-reveal-template — 已 append 進 {@link feed} 的回放已揭露前綴長度
+   * （單調游標）。core 的 `CHAT_HISTORY_LOADED` 事件一律送「同一條依 `time` 升序串的前綴」，故
+   * 此值即上次 reconcile 已 append 的長度，用來判定「前進只 append 新尾段」或「倒退 / 清空 /
+   * 換片重建」。換片（`clear()`）時歸 0。Parity iOS `replayChatAppendedCount` / Android
+   * `replayChatAppendedCount`.
+   */
+  private replayChatAppendedCount = 0;
+
+  /**
    * §2 — unclaimed-win set (deduped by winner.id). core stays headless; this
    * template owns the count + winner list and removes a winner on a claimed
    * result.
@@ -778,6 +832,25 @@ export class DefaultPlayerTemplate {
    * Unbounded by design — see design.md D5.
    */
   private readonly activityByVideoId = new Map<string, LBActiveEvent | null>();
+
+  /**
+   * chat-history-video-switch-cache-rn — instance-level, per-videoId LRU cache of the
+   * merged chat/activity feed's `history` + push-id dedupe set ({@link _seenPushIds}),
+   * so an in-place switch BACK to an already-visited video (same architecture as
+   * {@link activityByVideoId} above) restores its chat feed immediately instead of
+   * showing empty until the next poll. Populated by {@link clear} (the outgoing
+   * video's history, saved BEFORE it is wiped) and consumed by {@link
+   * setCurrentVideoId} (restores the incoming video's history if this session has
+   * visited it before). Bounded LRU (unlike {@link activityByVideoId}, which is
+   * unbounded per design.md D5 there) — the feed payload is materially heavier per
+   * entry (up to `chatRetain + activityRetain` items + a push-id Set, vs. a single
+   * small object). Mirrors the archived iOS `VideoFeedSnapshotCache`
+   * (`chat-history-video-switch-cache-template`), kept INSTANCE-scoped (not a
+   * process-level singleton) to match this file's existing per-videoId cache
+   * convention (design.md D4: RN's in-place-switch surfaces don't need
+   * cross-instance/close-reopen persistence).
+   */
+  private readonly feedSnapshotCache = new VideoFeedSnapshotCache();
 
   constructor(params: {
     sdkConfig: SDKConfig;
@@ -1162,6 +1235,27 @@ export class DefaultPlayerTemplate {
   }
 
   /**
+   * per-session 已見過的 push `id` 集合（rn-chat-push-id-dedupe-template）。換片 / 重入時由 {@link clear}
+   * 重置（parity iOS/Android/Flutter `_seenPushIds`）。
+   */
+  private _seenPushIds = new Set<string>();
+
+  /**
+   * 純函式：這筆 push 是否該 ingest（rn-chat-push-id-dedupe-template，port 自 iOS
+   * `shouldIngestPush(id:seen:)` / Android `shouldIngestPush(id, seen)` / Flutter
+   * `shouldIngestPush(String? id, Set<String> seen)`）。**身分判定，NEVER 比對內容**：`id` 缺省
+   * （`undefined`，舊後端）→ 一律 `true`，NOT 記錄；非空 `id` 已存在於 `seen` → `false`（重複，丟棄）；
+   * 首次出現 → 記錄進 `seen` + 回傳 `true`。`Set.add` 天然給出「是否已見過」語意——呼叫後
+   * `seen.has(id)` 恆為 true，parity Swift `seen.insert(id).inserted` / Kotlin `seen.add(id)`。
+   */
+  static shouldIngestPush(id: string | undefined, seen: Set<string>): boolean {
+    if (id === undefined) return true;
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  }
+
+  /**
    * 領獎 email 前端驗證**純函式**（win-claim-email-submit-rn-template，name parity iOS
    * `DefaultWinClaim.isValidEmail` / Android companion `@JvmStatic isValidEmail`）。
    * reference-ui 每個 keystroke 都用它決定「確認領獎」CTA 是否 disabled；
@@ -1205,6 +1299,41 @@ export class DefaultPlayerTemplate {
     this.notifyChange();
   }
 
+  // MARK: - 回放聊天 bridge（rn-replay-chat-history-reveal-template, parity iOS
+  // `handleReplayChatRevealed(_:)` / Android `handleReplayChatRevealed`）.
+
+  /** 取 {@link replayChatRow} 角色，把單筆回放留言 append 進 {@link feed}（不通知）。 */
+  private appendReplayComment(comment: LBReplayChatComment): void {
+    const { isHost, replyText } = replayChatRow(comment);
+    this.feed.appendChat(comment.text, comment.name, isHost, replyText);
+  }
+
+  /**
+   * 回放聊天 bridge：路由 core 的 `CHAT_HISTORY_LOADED` 事件，把「回放當前已揭露前綴」
+   * reconcile 進 {@link feed}，使 headless RN host 能透過既有的 `feedItems` / `feedHistory`
+   * 隨播放進度顯示回放歷史留言（與直播走相同的合流 feed → `notifyChange` 管線）。前進只
+   * append 新尾段（不閃爍）；倒退 / `[]` / 換片重建。一次呼叫 = 一次 coalesced
+   * `notifyChange()`（不論內部 append 幾筆）。直播不會送這個事件（core 非回放期不 fire）。
+   */
+  handleReplayChatRevealed(comments: readonly LBReplayChatComment[]): void {
+    const decision = replayChatReconcile(comments.length, this.replayChatAppendedCount);
+    let changed = false;
+    if (decision.kind === 'appendDelta') {
+      for (let i = decision.from; i < decision.to; i++) {
+        this.appendReplayComment(comments[i] as LBReplayChatComment);
+      }
+      changed = decision.to > decision.from;
+    } else {
+      this.feed.clear();
+      for (let i = 0; i < decision.to; i++) {
+        this.appendReplayComment(comments[i] as LBReplayChatComment);
+      }
+      changed = true;
+    }
+    this.replayChatAppendedCount = comments.length;
+    if (changed) this.notifyChange();
+  }
+
   /**
    * §1 — a poll `push[]` row → merged feed. A core event-BEGIN push
    * (`eid > 0 && (ek 非空 || at === 'begin')`) is surfaced as an INDEPENDENT
@@ -1228,8 +1357,16 @@ export class DefaultPlayerTemplate {
       kind?: string;
       // 主播 / AI 回覆的被回覆引用內容（backend `LBPushMsg.reply`），獨立字串。
       reply?: string;
+      // rn-chat-push-id-dedupe-template — 後端穩定 push id（wire 既有欄位，`pollPushItem` 早已透傳），
+      // 供本層以身分去重擋掉「後端在相鄰兩輪 poll 之間重送同一筆 push」造成的重複顯示。
+      id?: string;
     },
   ): void {
+    // rn-chat-push-id-dedupe-template — 身分去重 guard，NEVER 比對 text/name 等內容欄位。已見過的非空
+    // id 直接丟棄（不 append、不 notifyChange）；id 缺省（舊後端）一律照原行為放行。
+    if (!DefaultPlayerTemplate.shouldIngestPush(opts?.id, this._seenPushIds)) {
+      return;
+    }
     const eid = opts?.eid;
     const ek = opts?.ek;
     const at = opts?.at;
@@ -1243,7 +1380,11 @@ export class DefaultPlayerTemplate {
       eid > 0 &&
       (kind === 'event' || (typeof ek === 'string' && ek.length > 0) || at === 'begin');
     if (isEvent) {
-      this.feed.appendEventJoin(eid, ek ?? '', text);
+      // event-join-streamer-name-template-rn: opts?.name is `push.name` — the SAME
+      // per-message author name already threaded to onsale/comment/host rows below —
+      // now also carried onto the event-join row's OWN userName (not the channel-level
+      // hostName).
+      this.feed.appendEventJoin(eid, ek ?? '', text, opts?.name);
       this.notifyChange();
       return;
     }
@@ -2061,18 +2202,35 @@ export class DefaultPlayerTemplate {
    * or `[]`, with {@link currentActivityPageIndexValue} reset to `0`. Any OTHER
    * activities concurrently running when this video was left are NOT restored
    * here — they reappear once the next `syncActiveEvents` poll lands.
+   *
+   * chat-history-video-switch-cache-rn — a SECOND, independent cache lookup: if
+   * {@link feedSnapshotCache} has a snapshot for this videoId, restore the merged
+   * chat/activity feed ({@link feed}.restore) and the push-id dedupe set
+   * ({@link _seenPushIds}) from it, and force {@link hasIngestedBacklog} to `true`
+   * (parity archived iOS D3 — guards against a later stray full backlog-replay
+   * round double-appending on top of the restored snapshot). Both cache lookups
+   * are coalesced into a single {@link notifyChange} call.
    */
   setCurrentVideoId(videoId: string | null | undefined): void {
     if (typeof videoId === 'string' && videoId.length > 0) {
       this.currentVideoIdValue = videoId;
+      let changed = false;
+      const feedSnapshot = this.feedSnapshotCache.snapshot(videoId);
+      if (feedSnapshot != null) {
+        this.feed.restore(feedSnapshot.history);
+        this._seenPushIds = new Set(feedSnapshot.seenPushIds);
+        this.hasIngestedBacklog = true;
+        changed = true;
+      }
       if (this.activityByVideoId.has(videoId)) {
         const restored = this.activityByVideoId.get(videoId) ?? null;
         if (restored !== this.currentActivity) {
           this.activitiesValue = restored != null ? [restored] : [];
           this.currentActivityPageIndexValue = 0;
-          this.notifyChange();
+          changed = true;
         }
       }
+      if (changed) this.notifyChange();
     }
   }
 
@@ -2103,6 +2261,10 @@ export class DefaultPlayerTemplate {
     // 回放（已結束直播）flag — host-fed (`type === 3 || (type === 2 && liveStatus === 3)`,
     // via `isFinishedLiveReplay()`). pass-through to playerHeader; parity iOS/Android.
     isFinishedLiveReplay?: boolean;
+    // 限時搶購（flash sale）flag — host-fed passthrough of `channel.isFlashSale`
+    // (channel-flash-sale-flag-template-rn). pass-through to playerHeader; 純資料，
+    // template 不做任何 UI 決策.
+    isFlashSale?: boolean;
   }): void {
     if (this.playerHeader.handleHeaderChrome(fields)) this.notifyChange();
   }
@@ -2260,7 +2422,23 @@ export class DefaultPlayerTemplate {
    * `clear()` (iOS/Android/Flutter) so the notification semantics match.
    */
   clear(): void {
+    // chat-history-video-switch-cache-rn — snapshot the OUTGOING video's chat/activity
+    // feed history + push-id dedupe set BEFORE wiping them below (`this.feed.clear()` /
+    // `this._seenPushIds.clear()`), so a later in-place switch back to this same video
+    // can restore both atomically (see setCurrentVideoId). MUST run before
+    // `this.feed.clear()` — once that runs, `this.feed.history` is unrecoverable. Reads
+    // the same `currentVideoIdValue` as the `activityByVideoId` snapshot just below
+    // (clear() runs on VIDEO_SWITCH, strictly BEFORE VIDEO_OPEN's setCurrentVideoId
+    // advances currentVideoIdValue to the incoming id — so it still holds the outgoing
+    // id here). `feedSnapshotCache.save` no-ops for empty history (design.md D5) and
+    // defensively copies `_seenPushIds` (safe against the `.clear()` call below).
+    if (this.currentVideoIdValue != null) {
+      this.feedSnapshotCache.save(this.currentVideoIdValue, this.feed.history, this._seenPushIds);
+    }
     this.feed.clear();
+    // rn-replay-chat-history-reveal-template — 換片重置回放已揭露前綴游標，避免新影片（若也是
+    // 回放）的第一次 CHAT_HISTORY_LOADED 因沿用舊影片的游標而誤判成前綴變短。
+    this.replayChatAppendedCount = 0;
     this.unclaimed.clear();
     // activity-entry-video-switch-cache-and-hide-rn — snapshot the OUTGOING
     // video's currently-DISPLAYED activity (the `currentActivity` getter — a
@@ -2305,6 +2483,13 @@ export class DefaultPlayerTemplate {
     // on teardown / new video (parity with native `clear()` + resetUpcomingForSession).
     this.upcoming.clear();
     this.lastState = 'loading';
+    // rn-loadingcover-reset-on-video-switch-template — `loadingCover` was the one
+    // channel-derived field `clear()` forgot to reset: on an in-place video switch (the
+    // SAME `DefaultPlayerTemplate` instance persists — `LivebuyPlayer.tsx`'s `videoId`
+    // effect only calls `player.load(videoId)`, it does not re-`attachPlayerTemplate()`),
+    // this stayed at the OUTGOING video's cover URL until some caller happened to feed a
+    // new one, so the loading surface kept painting the previous video's cover photo.
+    this._loadingCover = '';
     // auth-gate-template-state — reset the auth-gate prompt. identity-label is
     // intentionally NOT reset (identity persists across feed clears; single
     // source is `AUTH_STATE_CHANGED`, not `clear()`).
@@ -2339,6 +2524,8 @@ export class DefaultPlayerTemplate {
     this.selectSpecRequiredFlag = false;
     // chat-history-dedupe — 換片後新場的第一批 backlog 應能正常 ingest（feed 已 clear、旗標 reset → 乾淨）。
     this.hasIngestedBacklog = false;
+    // rn-chat-push-id-dedupe-template — 換片後新場的 id 不與前一場撞名。
+    this._seenPushIds.clear();
     this.notifyChange();
   }
 

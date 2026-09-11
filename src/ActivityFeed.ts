@@ -111,9 +111,11 @@ export interface ChatFeedItem {
   /**
    * The chat author's nickname (chat-nickname-display, parity iOS `LBFeedItem.userName`).
    * Present ONLY for chat rows that carried a usable author name (blank → normalized to
-   * `undefined` by {@link MergedActivityFeed.appendChat}). System / activity / event-join
-   * rows NEVER carry it. `undefined` → reference-ui renders a text-only row (byte-identical
-   * to the pre-nickname layout).
+   * `undefined` by {@link MergedActivityFeed.appendChat}). System / activity rows NEVER
+   * carry it. Event-join rows carry their OWN, independently-defined `userName` field
+   * (see {@link EventJoinFeedItem.userName}, same normalization rule) — NOT this one.
+   * `undefined` → reference-ui renders a text-only row (byte-identical to the
+   * pre-nickname layout).
    */
   readonly userName?: string;
   // chat-message-taxonomy ⑤ — 群組① 真正的聊天的角色 metadata（parity iOS `LBFeedItem`）。
@@ -146,6 +148,17 @@ export interface EventJoinFeedItem {
   readonly keyword: string;
   readonly text: string;
   readonly joined: boolean;
+  /**
+   * event-join-streamer-name-template-rn (bug fix): the author name carried by THIS
+   * push message itself (source `push.name`), i.e. the streamer who triggered this
+   * particular event-begin announcement. Present only when the message carried a
+   * usable name (blank → normalized to `undefined` by
+   * {@link MergedActivityFeed.appendEventJoin}, same rule as {@link ChatFeedItem.userName}).
+   * **NOT** the channel-level, whole-session `hostName` (= `channel.shop.name`, the
+   * shop's name) used by `PlayerHeaderState` — MUST NOT be confused with or fall back
+   * to it. Whether/how to render a missing value is a reference-ui layout decision.
+   */
+  readonly userName?: string;
 }
 
 /**
@@ -310,9 +323,14 @@ export class MergedActivityFeed {
    * Surface a core event-begin push as an INDEPENDENT event-join row (host
    * draws `LBEventJoinLine`). `joined` starts false. event-END pushes MUST NOT
    * reach here — they stay plain chat rows (see `DefaultPlayerTemplate.handlePush`).
+   * `name` (event-join-streamer-name-template-rn) is THIS message's own author name
+   * (`push.name`) — normalized identically to {@link appendChat}'s `userName` (trim,
+   * blank → `undefined`) — and is NOT the channel-level `hostName`.
    */
-  appendEventJoin(eid: number, keyword: string, text = ''): void {
-    this.push({ kind: 'eventJoin', eid, keyword, text, joined: false });
+  appendEventJoin(eid: number, keyword: string, text = '', name?: string): void {
+    const trimmed = typeof name === 'string' ? name.trim() : '';
+    const userName = trimmed.length > 0 ? trimmed : undefined;
+    this.push({ kind: 'eventJoin', eid, keyword, text, joined: false, userName });
   }
 
   /**
@@ -360,6 +378,23 @@ export class MergedActivityFeed {
    */
   clear(): void {
     this.buffer.length = 0;
+    this.recentSignatures.length = 0;
+  }
+
+  /**
+   * chat-history-video-switch-cache-rn — replace the whole feed history with a
+   * previously-saved snapshot (see `VideoFeedSnapshotCache`), restoring an in-place
+   * switch BACK to an already-visited video instead of leaving it empty until the
+   * next poll. Applies the SAME per-type retention trim as {@link push} ({@link
+   * trimmedByType}) so a restored snapshot never exceeds the current chat/activity
+   * caps. Also resets the de-dup signature window (parity {@link clear}) — restored
+   * rows are already fully-processed history, not fresh incoming pushes, so there is
+   * nothing to dedupe against; new pushes after a restore start deduping fresh, same
+   * as after any `clear()`. Parity archived iOS `DefaultActivityFeed.restore(_:)`.
+   */
+  restore(items: readonly FeedItem[]): void {
+    const trimmed = trimmedByType(items, this.chatRetain, this.activityRetain);
+    this.buffer.splice(0, this.buffer.length, ...trimmed);
     this.recentSignatures.length = 0;
   }
 
