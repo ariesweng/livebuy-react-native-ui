@@ -223,6 +223,19 @@ const defaultSetNoticeGoods: GoodsTrackingSetter = (goodsGpn, enabled) => {
   LivebuySDK.setNoticeGoods(goodsGpn, enabled);
 };
 
+// rn-add-to-cart-login-gate-template — default login-state / policy providers.
+// Lazy-required (same seam as defaultSetAwaitGoods): the value import pulls in
+// NativeModules, unavailable in node/jest. Tests inject fakes and never reach
+// these; only a real RN runtime evaluates them.
+const defaultIsLoggedIn = (): Promise<boolean> => {
+  const { LivebuySDK } = require('livebuy-react-native');
+  return LivebuySDK.isLoggedIn();
+};
+const defaultRequireLoginForAddToCart = (): boolean => {
+  const { LivebuySDK } = require('livebuy-react-native');
+  return LivebuySDK.isRequireLoginForAddToCartEnabled();
+};
+
 // product-sheet-stack-template — default add-to-cart requester (route B). Parity
 // with the goods-tracking delegates: the template NEVER builds HTTP; it delegates
 // the add to the core public `LivebuySDK.addToCart`. The host (which owns the
@@ -249,6 +262,15 @@ export function isAddToCartAuthRequired(error: unknown): boolean {
   const e = error as { type?: unknown; code?: unknown };
   const code = typeof e.code === 'string' ? Number(e.code) : e.code;
   return e.type === 'serverError' && code === 401;
+}
+
+/**
+ * Pure decision (rn-add-to-cart-login-gate-template): does the host's global
+ * opt-in policy require blocking addToCart() locally — before any network
+ * call — right now? Mirrors iOS/Android `addToCartRequiresLoginLocally`.
+ */
+export function addToCartRequiresLoginLocally(requireLogin: boolean, isLoggedIn: boolean): boolean {
+  return requireLogin && !isLoggedIn;
 }
 
 /**
@@ -425,16 +447,30 @@ export function replayChatReconcile(incomingCount: number, appendedCount: number
 }
 
 /**
- * 把回放歷史 `LBReplayChatComment` 映射成 chat feed row 的角色 metadata。RN 的 wire 型別
- * （`LivebuyEvents.ts` `LBReplayChatComment`）**不含 `kind` 欄位**（與 iOS/Android 原生
- * `LBComment` 模型不同——那兩端的 decoder 在 wire 缺 `kind` 時才會 fallback 推導）。故這裡直接
- * 依 `name` / `reply` 推導角色，等同於 iOS `LBComment` decoder 缺 `kind` 時的 fallback 規則：
- * `name` 非空 → 觀眾留言（`isHost=false`）；`name` 空 + `reply` 非空 → 主播回覆
- * （`isHost=true`，帶引用）；其餘 → 主播留言（`isHost=true`，無引用）。判定不 trim，直接比對
- * wire 原始字串長度（`appendChat` 之後才對 `name`/`replyText` 做 trim + 正規化，這裡不重複做）。
- * Pure / testable.
+ * 把回放歷史 `LBReplayChatComment` 映射成 chat feed row 的角色 metadata。
+ *
+ * **`kind` 優先**（`fix-rn-comment-kind-wire-priority-core` 已把原生 `LBComment.kind`
+ * ——`LBMessageKind.rawValue`，例如 `"host"` / `"host_reply"` / `"comment"`——透傳到
+ * `LivebuyEvents.ts` `LBReplayChatComment.kind`，parity iOS/Android/Flutter 原生已解析完成的
+ * 分類結果，非原始 wire 字串）：`kind !== ''` 時直接依其值判型——`"host"` → 主播留言
+ * （`isHost=true`，無引用，即使 `reply` 有值也不帶出）；`"host_reply"` → 主播回覆
+ * （`isHost=true`，`replyText=reply`）；其餘值（含 `"comment"`）→ 觀眾留言（`isHost=false`）。
+ *
+ * 僅當 `kind === ''`（原生尚未帶這個欄位，版本落差，例如搭配尚未更新此橋接的舊版原生 binary）
+ * 才 fallback 到舊有的 `name`/`reply` 推導：`name` 非空 → 觀眾留言（`isHost=false`）；`name`
+ * 空 + `reply` 非空 → 主播回覆（`isHost=true`，帶引用）；其餘 → 主播留言（`isHost=true`，無
+ * 引用）。**這個 fallback 推導方向與真實後端資料相反**（主播列 `name` 實際上是非空的真實主播
+ * 暱稱，`name` 為空字串才代表主播留言）——單靠它會把所有主播留言誤判成觀眾留言，這正是
+ * `fix-rn-comment-kind-wire-priority-template` 要修正的 bug；`kind` 優先後不再受此影響，
+ * fallback 僅在缺省時才動用，維持既有 by-value 行為不變。判定不 trim，直接比對 wire 原始字串
+ * 長度（`appendChat` 之後才對 `name`/`replyText` 做 trim + 正規化，這裡不重複做）。Pure / testable。
  */
 export function replayChatRow(comment: LBReplayChatComment): { isHost: boolean; replyText?: string } {
+  if (comment.kind !== '') {
+    if (comment.kind === 'host') return { isHost: true };
+    if (comment.kind === 'host_reply') return { isHost: true, replyText: comment.reply };
+    return { isHost: false };
+  }
   if (comment.name.length > 0) return { isHost: false };
   if (comment.reply.length > 0) return { isHost: true, replyText: comment.reply };
   return { isHost: true };
@@ -642,6 +678,14 @@ export class DefaultPlayerTemplate {
   private readonly miniCart = new DefaultMiniCart();
   private readonly cartCTA = new DefaultCartCTA();
   private readonly addToCartRequester: CartAddRequester;
+  /**
+   * rn-add-to-cart-login-gate-template — login-state / policy providers consulted by
+   * {@link addToCart} before delegating to {@link addToCartRequester}. Injectable so unit
+   * tests can drive both combinations without a real native bridge; default to the
+   * lazy-required `LivebuySDK.isLoggedIn` / `LivebuySDK.isRequireLoginForAddToCartEnabled`.
+   */
+  private readonly isLoggedInProvider: () => Promise<boolean>;
+  private readonly requireLoginForAddToCartProvider: () => boolean;
   /** cart CTA「開啟購物車」passthrough — host wires its own checkout entry (D4). */
   private readonly onOpenCart?: (productId?: string) => void;
   /**
@@ -907,6 +951,17 @@ export class DefaultPlayerTemplate {
      */
     addToCartRequester?: CartAddRequester;
     /**
+     * rn-add-to-cart-login-gate-template — login-state / policy providers. {@link
+     * addToCart} reads `requireLoginForAddToCartProvider()` synchronously first and only
+     * `await`s `isLoggedInProvider()` when it is `true` (avoids an unnecessary native
+     * bridge round-trip when the host has not opted in — the default). Default to the
+     * lazy-required `LivebuySDK.isLoggedIn` / `LivebuySDK.isRequireLoginForAddToCartEnabled`
+     * (same lazy-require seam as `addToCartRequester` / `setAwaitGoods`). Injectable so
+     * unit tests can drive both combinations without a real native bridge.
+     */
+    isLoggedInProvider?: () => Promise<boolean>;
+    requireLoginForAddToCartProvider?: () => boolean;
+    /**
      * product-sheet-stack-template — host-takeover (route A `CART_ADD_REQUEST`)
      * flag. When the host takes over add-to-cart, the template MUST NOT delegate
      * route B (avoid the double-write). Defaults to false (template owns route B).
@@ -962,6 +1017,11 @@ export class DefaultPlayerTemplate {
     // (default = lazy-required `LivebuySDK.addToCart`; the template itself never
     // builds HTTP, headless write contract) + the host-takeover flag.
     this.addToCartRequester = params.addToCartRequester ?? defaultAddToCartRequester;
+    // rn-add-to-cart-login-gate-template — wire the login-state / policy providers
+    // (default = lazy-required LivebuySDK methods, same seam as addToCartRequester above).
+    this.isLoggedInProvider = params.isLoggedInProvider ?? defaultIsLoggedIn;
+    this.requireLoginForAddToCartProvider =
+      params.requireLoginForAddToCartProvider ?? defaultRequireLoginForAddToCart;
     this.hostOwnsCart = params.hostOwnsCart ?? false;
     this.onOpenCart = params.onOpenCart;
     // swipe-navigate-rn-template — wire the injected adjacent-video loader (host
@@ -2784,6 +2844,22 @@ export class DefaultPlayerTemplate {
    */
   async addToCart(): Promise<void> {
     if (this.hostOwnsCart) return; // route A owns it — no route-B delegation.
+    // rn-add-to-cart-login-gate-template：全域「加購前必須登入」政策開啟且未登入 → 本地攔截，
+    // 完全不委派 addToCartRequester。刻意排在 hostOwnsCart 之後（host 接管時 SDK 完全不該做
+    // 任何事）、sold-out / 選規格守門之前（parity iOS/Android：使用者連自己有沒有資格結帳都
+    // 不確定時，跟他談規格/庫存沒有意義）。只有政策開啟時才 await isLoggedInProvider()（避免
+    // 預設關閉時多一次不必要的 native bridge 往返）。重用既有 addToCartNeedsLoginFlag 呈現路
+    // 徑，不動 addToCartFailedFlag / addToCartInFlightFlag（比照既有 isAddToCartAuthRequired
+    // 分支同樣不碰這兩個旗標）。
+    const requireLogin = this.requireLoginForAddToCartProvider();
+    if (requireLogin) {
+      const isLoggedIn = await this.isLoggedInProvider();
+      if (addToCartRequiresLoginLocally(requireLogin, isLoggedIn)) {
+        this.addToCartNeedsLoginFlag = true;
+        this.notifyChange();
+        return;
+      }
+    }
     const detail = this.productSheet.detail;
     if (detail == null) return;
     if (this.qtyStepper.max === 0) return; // 缺貨 — blocked.

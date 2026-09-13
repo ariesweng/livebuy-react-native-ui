@@ -134,16 +134,21 @@ function decodeWinner(params: Record<string, unknown>): { winner: LBWinner; text
 /**
  * rn-replay-chat-history-reveal-template — decode the unified `CHAT_HISTORY_LOADED`
  * payload's `comments` field (native shape: array of `{ text, name, color, reply,
- * reply_color, time }`) into `LBReplayChatComment[]`. Defensive/tolerant: a
- * non-array `comments` decodes to `[]`; each element's six fields are individually
+ * reply_color, time, kind }`) into `LBReplayChatComment[]`. Defensive/tolerant: a
+ * non-array `comments` decodes to `[]`; each element's fields are individually
  * type-checked, a missing/wrong-typed field falls back to `''` (parity with the
  * other `routeEvent` cases' lenient decoding, e.g. `decodeWinner`). Never throws.
  *
  * fix-rn-replay-chat-progressive-reveal-template — currently UNUSED in production:
  * `ROUTED.CHAT_HISTORY_LOADED` no longer calls this (see that case's comment for why).
  * Kept for the future correct caller (once the RN native bridge forwards the
- * progressive `onReplayChatRevealed` seam) to reuse — the six-field decode shape is
+ * progressive `onReplayChatRevealed` seam) to reuse — the field decode shape is
  * unrelated to which event drives it.
+ *
+ * `kind` (`fix-rn-comment-kind-wire-priority-core`) is decoded here purely to keep this
+ * dead-but-kept helper's return type structurally assignable to `LBReplayChatComment`
+ * (now a required field there) — additive `str()` fallback, no behavioral change since
+ * this function has no caller.
  */
 function decodeReplayChatComments(comments: unknown): LBReplayChatComment[] {
   if (!Array.isArray(comments)) return [];
@@ -157,6 +162,7 @@ function decodeReplayChatComments(comments: unknown): LBReplayChatComment[] {
       reply: str(r?.reply),
       reply_color: str(r?.reply_color),
       time: str(r?.time),
+      kind: str(r?.kind),
     };
   });
 }
@@ -245,6 +251,17 @@ export interface AttachPlayerTemplateOptions {
    * `setAwaitGoods` — past review caught this exact forward being missed).
    */
   addToCartRequester?: CartAddRequester;
+  /**
+   * rn-add-to-cart-login-gate-template — login-state / policy providers consulted
+   * by `DefaultPlayerTemplate.addToCart()` before delegating to `addToCartRequester`.
+   * The Default template's own constructor already defaults these to the
+   * lazy-required `LivebuySDK.isLoggedIn` / `LivebuySDK.isRequireLoginForAddToCartEnabled`
+   * (same seam as `addToCartRequester`'s default) — this option is a pure forward for
+   * a host-supplied override, parity with `addToCartRequester` above. Injectable so
+   * unit tests capture / stub the delegated reads with a fake (no native bridge).
+   */
+  isLoggedInProvider?: () => Promise<boolean>;
+  requireLoginForAddToCartProvider?: () => boolean;
   /**
    * product-sheet-stack-template — host-takeover (route A `CART_ADD_REQUEST`)
    * flag. When the host takes over add-to-cart, the template MUST NOT delegate
@@ -828,6 +845,8 @@ export function attachPlayerTemplate(
       setAwaitGoods: options.setAwaitGoods,
       setNoticeGoods: options.setNoticeGoods,
       addToCartRequester: options.addToCartRequester,
+      isLoggedInProvider: options.isLoggedInProvider,
+      requireLoginForAddToCartProvider: options.requireLoginForAddToCartProvider,
       hostOwnsCart: options.hostOwnsCart,
       onOpenCart: options.onOpenCart,
       loadVideo: options.loadVideo,
