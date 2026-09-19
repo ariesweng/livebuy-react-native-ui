@@ -558,6 +558,12 @@ export interface LBMiniCartPeek {
    * `photos[0] ?? pic` 填入。鏡像 iOS / Android / Flutter `LBMiniCartPeek.pic`。
    */
   readonly pic: string;
+  /**
+   * 原價顯示字串（vod-now-introducing-original-price-template-rn）。鏡射 `LBProduct.
+   * originalPriceShow` 語意 — `''` = 無原價，非 optional。預設 `''` → 既有呼叫端（不顯式帶入這個
+   * 欄位）維持原碼相容。是否畫出劃線價像素屬 reference-ui 版面判斷，本欄位只負責帶值。
+   */
+  readonly originalPriceShow: string;
 }
 
 /**
@@ -583,19 +589,30 @@ export class DefaultMiniCart {
     soldOut: number;
     // 商品圖 URL（rb-rn-vod-now-introducing-multi-template，問題 9/10）。預設 '' → 既有呼叫 byte-identical。
     pic?: string;
+    // 原價顯示字串（vod-now-introducing-original-price-template-rn）。預設 '' → 既有呼叫 byte-identical。
+    originalPriceShow?: string;
   }): boolean {
     const pic = p.pic ?? '';
+    const originalPriceShow = p.originalPriceShow ?? '';
     if (
       this._peek !== null &&
       this._peek.productId === p.productId &&
       this._peek.name === p.name &&
       this._peek.priceShow === p.priceShow &&
       this._peek.soldOut === p.soldOut &&
-      this._peek.pic === pic
+      this._peek.pic === pic &&
+      this._peek.originalPriceShow === originalPriceShow
     ) {
       return false;
     }
-    this._peek = { productId: p.productId, name: p.name, priceShow: p.priceShow, soldOut: p.soldOut, pic };
+    this._peek = {
+      productId: p.productId,
+      name: p.name,
+      priceShow: p.priceShow,
+      soldOut: p.soldOut,
+      pic,
+      originalPriceShow,
+    };
     return true;
   }
 

@@ -648,6 +648,17 @@ export class DefaultPlayerTemplate {
   private readonly requestTogglePlayPause?: () => void;
   private readonly requestSeek?: (seconds: number) => void;
   private readonly requestSeekBy?: (delta: number) => void;
+  /**
+   * rn-vod-scrub-seek-tolerance-template — Android-only drag-to-scrub
+   * precision hint requesters. The host wires the player ref's
+   * `beginScrub()` / `endScrub()` (RN core bridge, `rn-vod-scrub-seek-
+   * tolerance-core`). Same architecture as {@link requestTogglePlayPause} —
+   * the template holds no player ref. Undefined → {@link beginScrub} /
+   * {@link endScrub} are safe no-ops (no crash) — this is also the natural
+   * state on iOS hosts, which have no matching core capability to inject.
+   */
+  private readonly requestBeginScrub?: () => void;
+  private readonly requestEndScrub?: () => void;
 
   /**
    * product-sheet-stack-template — five host-bindable商品 sheet-stack view-models.
@@ -995,6 +1006,13 @@ export class DefaultPlayerTemplate {
     requestTogglePlayPause?: () => void;
     requestSeek?: (seconds: number) => void;
     requestSeekBy?: (delta: number) => void;
+    /**
+     * rn-vod-scrub-seek-tolerance-template — injected Android-only
+     * drag-to-scrub precision hint requesters. See the field JSDoc on
+     * {@link requestBeginScrub} for the full contract.
+     */
+    requestBeginScrub?: () => void;
+    requestEndScrub?: () => void;
   }) {
     this.effectiveConfig = new EffectiveConfig(params.sdkConfig, params.hostOptions);
     this.onDismiss = params.onDismiss;
@@ -1006,6 +1024,8 @@ export class DefaultPlayerTemplate {
     this.requestTogglePlayPause = params.requestTogglePlayPause;
     this.requestSeek = params.requestSeek;
     this.requestSeekBy = params.requestSeekBy;
+    this.requestBeginScrub = params.requestBeginScrub;
+    this.requestEndScrub = params.requestEndScrub;
     // await-toggle-and-notice-tab-template-state — wire the goods-tracking model
     // to the core setters (default = lazy-required LivebuySDK methods; the model
     // itself never builds HTTP, headless write contract).
@@ -2434,6 +2454,27 @@ export class DefaultPlayerTemplate {
    */
   seekBy(delta: number): void {
     this.requestSeekBy?.(delta);
+  }
+
+  /**
+   * rn-vod-scrub-seek-tolerance-template — drag-to-scrub precision hint
+   * forwarder: the upcoming drag is starting. Calls the injected
+   * {@link requestBeginScrub}; safe no-op when unwired (including the
+   * natural iOS-host case, which never injects this requester). Pure
+   * forwarder — MUST NOT trigger any seek or redo gating (that lives in
+   * Android core's `live-playback-engine` capability).
+   */
+  beginScrub(): void {
+    this.requestBeginScrub?.();
+  }
+
+  /**
+   * rn-vod-scrub-seek-tolerance-template — drag-to-scrub precision hint
+   * forwarder: the drag has ended or was cancelled. Same no-op / no-regate
+   * contract as {@link beginScrub}.
+   */
+  endScrub(): void {
+    this.requestEndScrub?.();
   }
 
   /**

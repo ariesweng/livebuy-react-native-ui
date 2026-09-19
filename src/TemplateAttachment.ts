@@ -301,6 +301,19 @@ export interface AttachPlayerTemplateOptions {
   requestSeek?: (seconds: number) => void;
   requestSeekBy?: (delta: number) => void;
   /**
+   * rn-vod-scrub-seek-tolerance-template — injected Android-only
+   * drag-to-scrub precision hint requesters. The host wires the player
+   * ref's `beginScrub()` / `endScrub()` (RN core bridge,
+   * `rn-vod-scrub-seek-tolerance-core`); same architecture as
+   * `requestTogglePlayPause` (the RN template holds no player ref). The
+   * returned handle's `beginScrub()` / `endScrub()` delegate to these; when
+   * omitted those forwarders are safe no-ops — the natural state on iOS
+   * hosts, which have no matching core capability to inject. Pure
+   * forwarders — MUST NOT trigger any seek or redo gating.
+   */
+  requestBeginScrub?: () => void;
+  requestEndScrub?: () => void;
+  /**
    * mute-preference-persist-across-session-rn-template — host-wired query for the
    * wrapped native Player's actual current mute state (parity `loadVideo` /
    * `requestSeek` — the RN template holds no player ref, so a player-bound query
@@ -518,6 +531,18 @@ export interface PlayerTemplateAttachment {
    * no-regate contract as {@link PlayerTemplateAttachment.seek}.
    */
   seekBy(delta: number): void;
+  /**
+   * rn-vod-scrub-seek-tolerance-template — drag-to-scrub precision hint
+   * forwarder (delegates to the injected `requestBeginScrub`; safe no-op
+   * when unwired). MUST NOT trigger any seek or redo gating.
+   */
+  beginScrub(): void;
+  /**
+   * rn-vod-scrub-seek-tolerance-template — drag-to-scrub precision hint
+   * forwarder (delegates to the injected `requestEndScrub`; safe no-op when
+   * unwired). Same contract as {@link PlayerTemplateAttachment.beginScrub}.
+   */
+  endScrub(): void;
   /**
    * player-chrome-template — host-fed VideoInfoPanel info-tab fields (`title` /
    * `publishAt` / `shopName` / `shopIntro` / `shopLogo`; `description` EXCLUDED).
@@ -853,6 +878,8 @@ export function attachPlayerTemplate(
       requestTogglePlayPause: options.requestTogglePlayPause,
       requestSeek: options.requestSeek,
       requestSeekBy: options.requestSeekBy,
+      requestBeginScrub: options.requestBeginScrub,
+      requestEndScrub: options.requestEndScrub,
     });
 
   // Declared here (moved up from its previous spot just before `attachment` is
@@ -981,6 +1008,12 @@ export function attachPlayerTemplate(
     },
     seekBy(delta: number): void {
       template.seekBy(delta);
+    },
+    beginScrub(): void {
+      template.beginScrub();
+    },
+    endScrub(): void {
+      template.endScrub();
     },
     handleInfo(fields): void {
       template.handleInfo(fields);
