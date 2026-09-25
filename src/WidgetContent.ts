@@ -88,6 +88,16 @@ export interface LBWidgetContent {
    * layer's job (widget-product-card-content-template D2).
    */
   readonly productCard: string | null;
+  /**
+   * "First load in flight" (widget-loading-placeholder-rn). `true` while no
+   * page has loaded yet (`currentPage == 0`) AND a fetch is in progress;
+   * paging load-more (`currentPage >= 1`) does NOT touch this field. RN has no
+   * core instance to derive this from (widget content is host-wired, D7), so
+   * the HOST sets it directly via {@link LBWidgetSnapshot.isLoading} around its
+   * own `fetchWidget` call — this layer is a passive mirror, not a detector.
+   * Missing → `false` (nothing loading yet / not attached).
+   */
+  readonly isLoading: boolean;
 }
 
 /**
@@ -117,6 +127,14 @@ export interface LBWidgetSnapshot {
   liveVideo?: LBVideoItem | null;
   /** Floating closed flag → `minimized` derivation (D3). */
   isClosed?: boolean;
+  /**
+   * "First load in flight" (widget-loading-placeholder-rn). NOT a wire field —
+   * `/sdk/widget` never sends this; the HOST sets it directly around its own
+   * `fetchWidget` call (e.g. `{ isLoading: true }` before the await, then
+   * `{ isLoading: false, videos, mode, currentPage, lastPage }` after it
+   * resolves). `decodeWidgetSnapshot` never populates this facet.
+   */
+  isLoading?: boolean;
 }
 
 /**
@@ -152,7 +170,11 @@ export function widgetContentMode(
  * model keeps the prior facet). The widget COLORS (`widget_color` /
  * `widget_bgcolor`) are NOT decoded here — they arrive already mapped to
  * camelCase `LBWidgetColors` from `widget-bridge-color-core`'s bridge mapper
- * (`onWidgetResponse`), the correct layer boundary.
+ * (`onWidgetResponse`), the correct layer boundary. `isLoading`
+ * (widget-loading-placeholder-rn) is likewise NEVER decoded here — it has no
+ * wire key at all (`/sdk/widget` never sends it); the returned snapshot's
+ * `isLoading` is always `undefined`, and the host sets that facet directly by
+ * calling `handleWidgetSnapshot({ isLoading })` around its own fetch.
  */
 export function decodeWidgetSnapshot(params: Record<string, unknown>): LBWidgetSnapshot {
   const out: LBWidgetSnapshot = {};
@@ -200,6 +222,10 @@ export class DefaultWidgetContent {
   // widget-product-card-content-template D2 — the seed is `null` ("backend sent
   // nothing"), NOT the backend default 'inside'.
   private _productCard: string | null = null;
+  // widget-loading-placeholder-rn — host-set "first load in flight" flag. Not
+  // derived here (no core instance to read on RN); the host is the only party
+  // that knows when its own fetchWidget call starts/ends.
+  private _isLoading = false;
 
   /** Current host-bindable widget-content snapshot. */
   get current(): LBWidgetContent {
@@ -212,6 +238,7 @@ export class DefaultWidgetContent {
       widgetColor: this._widgetColor,
       widgetBgcolor: this._widgetBgcolor,
       productCard: this._productCard,
+      isLoading: this._isLoading,
     };
   }
 
@@ -245,6 +272,10 @@ export class DefaultWidgetContent {
     }
     if (snapshot.liveVideo !== undefined && snapshot.liveVideo !== this._liveVideo) {
       this._liveVideo = snapshot.liveVideo;
+      changed = true;
+    }
+    if (snapshot.isLoading !== undefined && snapshot.isLoading !== this._isLoading) {
+      this._isLoading = snapshot.isLoading;
       changed = true;
     }
     return changed;
@@ -302,7 +333,8 @@ export class DefaultWidgetContent {
       this._liveVideo === null &&
       this._widgetColor === 1 &&
       this._widgetBgcolor === null &&
-      this._productCard === null;
+      this._productCard === null &&
+      !this._isLoading;
     this._videos = [];
     this._coreMode = 'carousel';
     this._isClosed = false;
@@ -312,6 +344,7 @@ export class DefaultWidgetContent {
     this._widgetColor = 1;
     this._widgetBgcolor = null;
     this._productCard = null;
+    this._isLoading = false;
     return !wasDefault;
   }
 }
