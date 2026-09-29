@@ -235,6 +235,19 @@ const defaultRequireLoginForAddToCart = (): boolean => {
   const { LivebuySDK } = require('livebuy-react-native');
   return LivebuySDK.isRequireLoginForAddToCartEnabled();
 };
+// rn-cart-add-proactive-gate-retry-token-template — proactive-gate retry seams. Same lazy-require
+// seam as above: a headless jest run never reaches native unless a test injects fakes.
+const defaultRegisterPendingRetry = (action: () => void): string => {
+  const { LivebuySDK } = require('livebuy-react-native');
+  return LivebuySDK.registerPendingRetry(action);
+};
+const defaultDispatchAuthRequired = (
+  triggerAction: string,
+  opts?: { videoId?: string; retryToken?: string },
+): Promise<boolean> => {
+  const { LivebuySDK } = require('livebuy-react-native');
+  return LivebuySDK.dispatchAuthRequired(triggerAction, opts);
+};
 
 // product-sheet-stack-template — default add-to-cart requester (route B). Parity
 // with the goods-tracking delegates: the template NEVER builds HTTP; it delegates
@@ -697,6 +710,12 @@ export class DefaultPlayerTemplate {
    */
   private readonly isLoggedInProvider: () => Promise<boolean>;
   private readonly requireLoginForAddToCartProvider: () => boolean;
+  /** rn-cart-add-proactive-gate-retry-token-template — proactive-gate retry-token seams. */
+  private readonly registerPendingRetryProvider: (action: () => void) => string;
+  private readonly dispatchAuthRequiredProvider: (
+    triggerAction: string,
+    opts?: { videoId?: string; retryToken?: string },
+  ) => Promise<boolean>;
   /** cart CTA「開啟購物車」passthrough — host wires its own checkout entry (D4). */
   private readonly onOpenCart?: (productId?: string) => void;
   /**
@@ -973,6 +992,17 @@ export class DefaultPlayerTemplate {
     isLoggedInProvider?: () => Promise<boolean>;
     requireLoginForAddToCartProvider?: () => boolean;
     /**
+     * rn-cart-add-proactive-gate-retry-token-template — the proactive login gate registers a JS
+     * retry closure (`registerPendingRetryProvider`, default `LivebuySDK.registerPendingRetry`) and
+     * dispatches `AUTH_REQUIRED('cart_add')` carrying its token (`dispatchAuthRequiredProvider`,
+     * default `LivebuySDK.dispatchAuthRequired`). Injectable for unit tests; both are lazy-required.
+     */
+    registerPendingRetryProvider?: (action: () => void) => string;
+    dispatchAuthRequiredProvider?: (
+      triggerAction: string,
+      opts?: { videoId?: string; retryToken?: string },
+    ) => Promise<boolean>;
+    /**
      * product-sheet-stack-template — host-takeover (route A `CART_ADD_REQUEST`)
      * flag. When the host takes over add-to-cart, the template MUST NOT delegate
      * route B (avoid the double-write). Defaults to false (template owns route B).
@@ -1042,6 +1072,10 @@ export class DefaultPlayerTemplate {
     this.isLoggedInProvider = params.isLoggedInProvider ?? defaultIsLoggedIn;
     this.requireLoginForAddToCartProvider =
       params.requireLoginForAddToCartProvider ?? defaultRequireLoginForAddToCart;
+    this.registerPendingRetryProvider =
+      params.registerPendingRetryProvider ?? defaultRegisterPendingRetry;
+    this.dispatchAuthRequiredProvider =
+      params.dispatchAuthRequiredProvider ?? defaultDispatchAuthRequired;
     this.hostOwnsCart = params.hostOwnsCart ?? false;
     this.onOpenCart = params.onOpenCart;
     // swipe-navigate-rn-template — wire the injected adjacent-video loader (host
@@ -2871,6 +2905,30 @@ export class DefaultPlayerTemplate {
   }
 
   /**
+   * rn-cart-add-proactive-gate-retry-token-template — proactive gate: register a retry closure and
+   * dispatch `AUTH_REQUIRED('cart_add')` with its token. Token is kept whether or not the host
+   * intercepts (parity iOS/Android). Never throws / never touches the needs-login flag; a failing
+   * provider or rejected dispatch is swallowed (debug log only). The closure re-runs
+   * {@link addToCart} so the gate re-evaluates at retry time.
+   */
+  private dispatchProactiveCartAddAuthRequired(): void {
+    try {
+      const token = this.registerPendingRetryProvider(() => {
+        void this.addToCart().catch(() => undefined);
+      });
+      const opts = {
+        ...(this.currentVideoIdValue != null ? { videoId: this.currentVideoIdValue } : {}),
+        ...(token ? { retryToken: token } : {}),
+      };
+      void this.dispatchAuthRequiredProvider('cart_add', opts).catch((e: unknown) => {
+        if (__DEV__) console.log('[DefaultTemplate] cart_add AUTH_REQUIRED dispatch failed', e);
+      });
+    } catch (e) {
+      if (__DEV__) console.log('[DefaultTemplate] cart_add retry registration failed', e);
+    }
+  }
+
+  /**
    * product-sheet-stack-template — the add-to-cart intent (route B). Guards:
    *   - host-takeover (route A) → MUST NOT delegate (avoid double-write).
    *   - no open product → no-op.
@@ -2898,6 +2956,8 @@ export class DefaultPlayerTemplate {
       if (addToCartRequiresLoginLocally(requireLogin, isLoggedIn)) {
         this.addToCartNeedsLoginFlag = true;
         this.notifyChange();
+        // Flag + notify are already applied synchronously above; the dispatch is fire-and-forget.
+        this.dispatchProactiveCartAddAuthRequired();
         return;
       }
     }

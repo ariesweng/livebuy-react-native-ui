@@ -262,6 +262,12 @@ export interface AttachPlayerTemplateOptions {
    */
   isLoggedInProvider?: () => Promise<boolean>;
   requireLoginForAddToCartProvider?: () => boolean;
+  /** rn-cart-add-proactive-gate-retry-token-template — pure forward; template defaults to LivebuySDK.*. */
+  registerPendingRetryProvider?: (action: () => void) => string;
+  dispatchAuthRequiredProvider?: (
+    triggerAction: string,
+    opts?: { videoId?: string; retryToken?: string },
+  ) => Promise<boolean>;
   /**
    * product-sheet-stack-template — host-takeover (route A `CART_ADD_REQUEST`)
    * flag. When the host takes over add-to-cart, the template MUST NOT delegate
@@ -872,6 +878,8 @@ export function attachPlayerTemplate(
       addToCartRequester: options.addToCartRequester,
       isLoggedInProvider: options.isLoggedInProvider,
       requireLoginForAddToCartProvider: options.requireLoginForAddToCartProvider,
+      registerPendingRetryProvider: options.registerPendingRetryProvider,
+      dispatchAuthRequiredProvider: options.dispatchAuthRequiredProvider,
       hostOwnsCart: options.hostOwnsCart,
       onOpenCart: options.onOpenCart,
       loadVideo: options.loadVideo,
