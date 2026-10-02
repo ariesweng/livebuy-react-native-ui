@@ -13,6 +13,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.2] - 2026-10-02
+
+> **純 metadata 版號 bump，零內容變動。** 因 core patch 到 `2.9.2`，`peerDependencies.livebuy-react-native`
+> 由 `^2.9.1` 追新為 `^2.9.2`（`check-ui-package-versions.sh` 要求精確對齊），版號 bump 一個 patch。
+> ⚠️ 升到 ui `1.12.2` 的 host 需同時把 core 升到 `2.9.2`。
+
+## [1.12.1] - 2026-10-02
+
+> **純 metadata 版號 bump，零內容變動。** `livebuy-react-native-ui` 本身無程式碼異動；因 core
+> （`livebuy-react-native`）patch 到 `2.9.1`（`rn-android-bridge-core-pin-4-26-0`），
+> `peerDependencies.livebuy-react-native` 隨之從 `^2.9.0` 追新為 `^2.9.1`
+> （`check-ui-package-versions.sh` 硬性要求精確對齊），版號 bump 一個 patch（比照 `1.11.2` 先例）。
+> ⚠️ 升到 ui `1.12.1` 的 host 需同時把 core 升到 `2.9.1`。
+
+## [1.12.0] - 2026-09-29
+
+> **minor，含行為變更。** `peerDependencies.livebuy-react-native` 下限升為 `^2.9.0`（使用新 core 符號
+> `dispatchAuthRequired` / `registerPendingRetry`），請先升 core 再升 ui。
+
+### Changed
+
+- **drop-in 主動加購登入閘**（`requireLoginForAddToCart` 且訪客點加購；`rn-cart-add-proactive-gate-retry-token-template`）：
+  由「只設本地旗標、不派發」改為註冊 retry 並派發 `AUTH_REQUIRED(cart_add)` 帶 `retry_token`。
+  **行為變更**：原本 host 的 `AUTH_REQUIRED` listener 收不到此次攔截，現在會收到，host 可於登入後以
+  `retryPendingAction(retry_token)` 重試。
+
+## [1.11.2] - 2026-09-29
+
+> **純 metadata 版號 bump，零內容變動。** 本輪 `livebuy-react-native-ui` 本身無程式碼異動；因
+> core（`livebuy-react-native`）minor bump 到 `2.8.0`（`rn-release-prep-v2-8-0`），
+> `peerDependencies.livebuy-react-native` 隨之從 `^2.7.1` 追新為 `^2.8.0`
+> （`check-ui-package-versions.sh` 硬性要求精確對齊，即使 caret range 本來就涵蓋 `2.8.0`），
+> 版號 bump 一個 patch（無內容變動，比照 `1.11.1` 純 metadata 先例）。
+
+## [1.11.1] - 2026-09-25
+
+> **純 metadata 版號 bump，零內容變動。** 本輪 `livebuy-react-native-ui` 本身無程式碼異動；因
+> core（`livebuy-react-native`）patch bump 到 `2.7.1`（`rn-android-bridge-core-pin-4-23-0`），
+> `peerDependencies.livebuy-react-native` 隨之從 `^2.7.0` 追新為 `^2.7.1`
+> （`check-ui-package-versions.sh` 硬性要求精確對齊，即使 caret range 本來就涵蓋 `2.7.1`），
+> 版號比照前一輪慣例 bump 一個 patch。
+
+## [1.11.0] - 2026-09-25
+
+> **純 metadata 版號 bump，零內容變動。** 本輪 `livebuy-react-native-ui` 本身無程式碼異動；因
+> core（`livebuy-react-native`）bump 到 `2.7.0`，`peerDependencies.livebuy-react-native` 隨之
+> 從 `^2.6.0` 追新為 `^2.7.0`（`check-ui-package-versions.sh` 硬性要求精確對齊），版號比照
+> `livebuy-react-native-reference-ui` 同步 lockstep 至 `1.11.0`。
+
+## [1.10.0] - 2026-09-23
+
+> **純 metadata 版號 bump，零內容變動。** 本輪 `livebuy-react-native-ui` 本身無程式碼異動；因
+> core（`livebuy-react-native`）bump 到 `2.6.0`，`peerDependencies.livebuy-react-native` 隨之
+> 從 `^2.5.1` 追新為 `^2.6.0`（`check-ui-package-versions.sh` 硬性要求精確對齊），版號比照
+> `livebuy-react-native-reference-ui` 同步 lockstep 至 `1.10.0`。
+
+## [1.9.1] - 2026-09-21
+
+> **純 metadata 版號 bump，零內容變動。** 本輪 `livebuy-react-native-ui` 本身無程式碼異動；因
+> core（`livebuy-react-native`）bump 到 `2.5.1`，`peerDependencies.livebuy-react-native` 隨之
+> 從 `^2.5.0` 追新為 `^2.5.1`（`check-ui-package-versions.sh` 硬性要求精確對齊），版號一併
+> patch bump 以承載這個 metadata 變動。
+
+## [1.9.0] - 2026-09-20
+
+> **minor，零 BREAKING。** 自 `1.8.0` 以來累積 2 個內容 commit。
+
+### Added
+
+- **MiniCartPeek 原價劃線，template 收尾**（`vod-now-introducing-original-price-template-rn`）：
+  `LBMiniCartPeek` 新增 additive 欄位 `originalPriceShow`，parity iOS/Android 已完成、Flutter
+  待補。
+- **`beginScrub()`/`endScrub()` 純轉發**（`rn-vod-scrub-seek-tolerance-template`）：
+  `DefaultPlayerTemplate`/`TemplateAttachment` 新增轉發，比照既有
+  `togglePlayPause`/`seek`/`seekBy` 模式——template 不持有 player ref，由 host 在 attach 時注入
+  `requestBeginScrub`/`requestEndScrub`。
+
 ## [1.8.0] - 2026-09-13
 
 > **minor，零 BREAKING。** 自 `1.7.0` 以來累積 2 個內容 commit，跟進 core 層的加購登入閘與回放
