@@ -13,6 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.14.0] - 2026-10-15
+
+> **純 metadata 版號 bump，零內容變動。** 因 core minor 到 `2.11.0`，`peerDependencies.livebuy-react-native`
+> 由 `^2.10.0` 追新為 `^2.11.0`（`check-ui-package-versions.sh` 要求精確對齊）。
+
+### Changed
+
+- peer `livebuy-react-native` `^2.10.0` → `^2.11.0`。⚠️ 升到 ui `1.14.0` 的 host 需同時把 core 升到 `2.11.0`
+  （進而需要原生 iOS／Android `4.29.0`；CocoaPods host 的 `LivebuySDK` `:podspec =>` URL 必須指向
+  `v4.29.0`（或更新）的 release，詳見 `livebuy-react-native` `2.11.0` 的 CHANGELOG）。
+
 ## [1.13.0] - 2026-10-14
 
 > **純 metadata 版號 bump，零內容變動。** 因 core minor 到 `2.10.0`，`peerDependencies.livebuy-react-native`
