@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.15.0] - 2026-10-16
+
+> **view-model，minor，無 BREAKING。** peer `livebuy-react-native` 由 `^2.11.0` 提高到 `^2.12.0`。
+
+### Changed
+
+- **聊天改用原生組好的句子**（`chat-composed-text-rn-template`）：聊天 feed、活動 toast、回放留言的文字改讀 `composed_text` /
+  `composed_name` / `composed_reply`，缺時退回原本的 `text` / `name` / `reply`（後端未上線前畫面不變）。feed item 公開形狀不變。
+
 ## [1.14.0] - 2026-10-15
 
 > **純 metadata 版號 bump，零內容變動。** 因 core minor 到 `2.11.0`，`peerDependencies.livebuy-react-native`

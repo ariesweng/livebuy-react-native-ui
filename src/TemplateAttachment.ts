@@ -1,4 +1,4 @@
-import { DefaultPlayerTemplate, DefaultWidgetTemplate } from './DefaultTemplate';
+import { DefaultPlayerTemplate, DefaultWidgetTemplate, composedOr } from './DefaultTemplate';
 import { LivebuyUI } from './LivebuyUI';
 import type { LBUIOptions } from './LBUIOptions';
 import { ActivityTier } from './ActivityFeed';
@@ -163,6 +163,11 @@ function decodeReplayChatComments(comments: unknown): LBReplayChatComment[] {
       reply_color: str(r?.reply_color),
       time: str(r?.time),
       kind: str(r?.kind),
+      // chat-composed-text-rn-template — keep the native-core-composed keys when present as strings
+      // (absent / wrong-typed → omitted, so `composedOr` falls back to text / name / reply).
+      ...(typeof r?.composed_text === 'string' ? { composed_text: r.composed_text } : {}),
+      ...(typeof r?.composed_name === 'string' ? { composed_name: r.composed_name } : {}),
+      ...(typeof r?.composed_reply === 'string' ? { composed_reply: r.composed_reply } : {}),
     };
   });
 }
@@ -189,11 +194,17 @@ export function deriveChatRailFlags(
   };
 }
 
-/** Invoke `fn` with the `text` string of each row in a poll bucket array. */
+/**
+ * Invoke `fn` with the display text of each row in a poll bucket array.
+ *
+ * chat-composed-text-rn-template — display text = the native-core-composed `composed_text` when it
+ * is a string, else the backend `text` (see {@link composedOr}); a row with neither is skipped
+ * (same as before for rows without `text`).
+ */
 function forEachText(bucket: unknown, fn: (text: string) => void): void {
   if (!Array.isArray(bucket)) return;
   for (const row of bucket) {
-    const text = (row as { text?: unknown })?.text;
+    const text = composedOr(row, 'text');
     if (typeof text === 'string') fn(text);
   }
 }
@@ -691,7 +702,6 @@ function routeEvent(template: DefaultPlayerTemplate, event: LBSdkEvent): void {
       if (Array.isArray(params.push)) {
         for (const row of params.push) {
           const r = row as {
-            text?: unknown;
             eid?: unknown;
             ek?: unknown;
             at?: unknown;
@@ -699,12 +709,13 @@ function routeEvent(template: DefaultPlayerTemplate, event: LBSdkEvent): void {
             ct?: unknown;
             p?: unknown;
             price?: unknown;
-            name?: unknown;
             kind?: unknown;
-            reply?: unknown;
             id?: unknown;
           };
-          if (typeof r?.text === 'string') {
+          // chat-composed-text-rn-template — text / name / reply 改讀原生 core 組好的 composed_*，缺 / 非字串
+          // 時退回 text / name / reply（composedOr）。判型（kind / color / eid / ek / at / ct / p）仍看原始欄位。
+          const text = composedOr(row, 'text');
+          if (typeof text === 'string') {
             // color / ct / p are forwarded so handlePush can route SYSTEM / 商品推播 notices
             // (product-push color #66F796 / event / promo) through the de-duped path
             // (activity-feed-dedupe-system-push parity). `name` is the author nickname
@@ -713,7 +724,7 @@ function routeEvent(template: DefaultPlayerTemplate, event: LBSdkEvent): void {
             // 引用內容（主播 / AI 回覆的引用框）。核心 pollReceivedEventParams 已序列化（缺則退回 color）。
             // rn-chat-push-id-dedupe-template — `id`（既有 wire 欄位，早已透傳、先前從未被讀取）供
             // `handlePush` 以身分去重擋掉後端相鄰兩輪 poll 之間重送同一筆 push 造成的重複顯示。
-            template.handlePush(r.text, {
+            template.handlePush(text, {
               eid: typeof r.eid === 'number' ? r.eid : undefined,
               ek: typeof r.ek === 'string' ? r.ek : undefined,
               at: typeof r.at === 'string' ? r.at : undefined,
@@ -722,9 +733,9 @@ function routeEvent(template: DefaultPlayerTemplate, event: LBSdkEvent): void {
               p: typeof r.p === 'string' ? r.p : undefined,
               // chat-message-taxonomy ⑤ — 已格式化開賣價（onsale 商品開賣卡現價，核心序列化提供）。
               price: typeof r.price === 'string' ? r.price : undefined,
-              name: typeof r.name === 'string' ? r.name : undefined,
+              name: composedOr(row, 'name'),
               kind: typeof r.kind === 'string' ? r.kind : undefined,
-              reply: typeof r.reply === 'string' ? r.reply : undefined,
+              reply: composedOr(row, 'reply'),
               id: typeof r.id === 'string' ? r.id : undefined,
             });
           }

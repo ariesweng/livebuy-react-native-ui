@@ -479,14 +479,31 @@ export function replayChatReconcile(incomingCount: number, appendedCount: number
  * 長度（`appendChat` 之後才對 `name`/`replyText` 做 trim + 正規化，這裡不重複做）。Pure / testable。
  */
 export function replayChatRow(comment: LBReplayChatComment): { isHost: boolean; replyText?: string } {
+  // chat-composed-text-rn-template — 判型仍看原始 `kind` / `name` / `reply`；只有帶出的引用文字改用原生
+  // 組好的 `composed_reply`（缺 / 非字串退回 `reply`）。
   if (comment.kind !== '') {
     if (comment.kind === 'host') return { isHost: true };
-    if (comment.kind === 'host_reply') return { isHost: true, replyText: comment.reply };
+    if (comment.kind === 'host_reply') return { isHost: true, replyText: composedOr(comment, 'reply') };
     return { isHost: false };
   }
   if (comment.name.length > 0) return { isHost: false };
-  if (comment.reply.length > 0) return { isHost: true, replyText: comment.reply };
+  if (comment.reply.length > 0) return { isHost: true, replyText: composedOr(comment, 'reply') };
   return { isHost: true };
+}
+
+/**
+ * chat-composed-text-rn-template — 讀聊天 payload 的顯示文字：原生 core 組好的 `composed_<key>` 是字串就用它
+ * （空字串也照用，由原生決定）；缺 / null / 非字串 → 退回原始 `<key>`（字串才用）；兩者皆無 → `undefined`。
+ * 句型只放原生 core，RN 不另組字。RN bridge 目前 pin 的原生版本尚未送 `composed_*`，退回是唯一實際路徑。
+ * 呼叫端在 feed item **建立當下**讀一次，之後換語言不重組既有 item。Pure / testable。
+ */
+export function composedOr(row: unknown, key: 'text' | 'name' | 'reply'): string | undefined {
+  if (row == null || typeof row !== 'object') return undefined;
+  const r = row as Record<string, unknown>;
+  const composed = r[`composed_${key}`];
+  if (typeof composed === 'string') return composed;
+  const raw = r[key];
+  return typeof raw === 'string' ? raw : undefined;
 }
 
 export class DefaultPlayerTemplate {
@@ -1419,7 +1436,13 @@ export class DefaultPlayerTemplate {
   /** 取 {@link replayChatRow} 角色，把單筆回放留言 append 進 {@link feed}（不通知）。 */
   private appendReplayComment(comment: LBReplayChatComment): void {
     const { isHost, replyText } = replayChatRow(comment);
-    this.feed.appendChat(comment.text, comment.name, isHost, replyText);
+    // chat-composed-text-rn-template — 顯示文字 / 暱稱改用原生組好的 composed_*（缺時退回 text / name）。
+    this.feed.appendChat(
+      composedOr(comment, 'text') ?? '',
+      composedOr(comment, 'name'),
+      isHost,
+      replyText,
+    );
   }
 
   /**
