@@ -13,6 +13,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.17.0] - 2026-11-22
+
+> **view-model，minor，無 BREAKING。** peer `livebuy-react-native` `^2.13.0` → `^2.14.0`。
+> **驗證範圍**：`npx jest` 通過；iOS／Android 模擬器實測加入購物車成功。**未經真機實測。**
+
+### Added
+
+- `handleChannelShopId(shopId)`（template 與 attachment 皆有）：餵入當前頻道商家 id（`rn-add-to-cart-channel-shop-id-template`）。
+
+### Fixed
+
+- **drop-in 加入購物車一律失敗**（`rn-add-to-cart-default-requester-template`）：預設加購 requester 之前直接 reject
+  「addToCartRequester not wired」，host 也收不到 `CART_ADD_REQUEST`。現在預設呼叫 `LivebuySDK.addToCart`，與 iOS／Android／Flutter 相同。
+  商家 id 依序取：當前頻道商家 id（非空）→ `configure()` 的 `shopId` → 都沒有就 reject、不呼叫 core。host 自己注入的 requester 與
+  `hostOwnsCart` 行為不變。
+
 ## [1.16.0] - 2026-11-21
 
 > **view-model，minor。** peer `livebuy-react-native` `^2.12.2` → `^2.13.0`。

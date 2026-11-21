@@ -258,9 +258,13 @@ export interface AttachPlayerTemplateOptions {
   /**
    * product-sheet-stack-template — route-B add-to-cart requester. The Default
    * template delegates `addToCart()` to `LivebuySDK.addToCart` (route B → the
-   * `LBCartResult`; the template NEVER builds HTTP). The host wires the real
-   * requester (it owns the configured `shopId`). When omitted, the template's
-   * `addToCart()` is inert (the default requester rejects). Forwarded here so the
+   * `LBCartResult`; the template NEVER builds HTTP). Optional override: when
+   * omitted, the template's default requester calls core `LivebuySDK.addToCart`
+   * with the current channel's shop id (`handleChannelShopId`), else the configured
+   * one (`LivebuySDK.currentShopId()`), and rejects without a bridge call when there
+   * is neither (rn-add-to-cart-default-requester-template /
+   * rn-add-to-cart-channel-shop-id-template).
+   * A host-injected requester replaces the default. Forwarded here so the
    * documented host accessor wires it (parity with `requestEventJoin` /
    * `setAwaitGoods` — past review caught this exact forward being missed).
    */
@@ -521,6 +525,15 @@ export interface PlayerTemplateAttachment {
    * (`productDetailState.recommendations`).
    */
   handleOtherGoods(otherGoods: readonly LBProduct[] | undefined | null): void;
+  /**
+   * rn-add-to-cart-channel-shop-id-template — host-fed current channel shop id
+   * (`LBPlayerChannelInfo.shopId`). RN has NO `ingestChannel()`, so the host forwards it
+   * on every `onChannelChange` (parity with `handleHeaderChrome` / `handleOtherGoods`).
+   * Overwritten by each call; `""` means "none". Cached only — the default add-to-cart
+   * requester prefers it over `LivebuySDK.currentShopId()` (parity iOS / Android
+   * `channel.shop.id`).
+   */
+  handleChannelShopId(shopId: string | undefined | null): void;
   /**
    * swipe-navigate-rn-template — switch to the previous adjacent video (delegates
    * to the injected `loadVideo`; no-op when there is no previous video / unwired).
@@ -1034,6 +1047,9 @@ export function attachPlayerTemplate(
     },
     handleOtherGoods(otherGoods): void {
       template.handleOtherGoods(otherGoods);
+    },
+    handleChannelShopId(shopId): void {
+      template.handleChannelShopId(shopId);
     },
     navigateToPrev(): void {
       template.navigateToPrev();

@@ -79,6 +79,7 @@ import {
   DefaultQtyStepper,
   DefaultMiniCart,
   DefaultCartCTA,
+  makeCoreAddToCartRequester,
   type CartAddRequester,
   type LBProductDetailState,
   type LBVariantState,
@@ -260,24 +261,32 @@ const defaultDispatchAuthRequired = (
   return LivebuySDK.dispatchAuthRequired(triggerAction, opts);
 };
 
-// product-sheet-stack-template — default add-to-cart requester (route B). Parity
-// with the goods-tracking delegates: the template NEVER builds HTTP; it delegates
-// the add to the core public `LivebuySDK.addToCart`. The host (which owns the
-// configured `shopId`) is expected to inject a requester that supplies `shopId`;
-// when omitted, this default rejects (the template's add is then inert) so a
-// headless jest test never reaches the native bridge. Injectable so unit tests
-// capture the delegated request with a fake.
-const defaultAddToCartRequester: CartAddRequester = () =>
-  Promise.reject(
-    new Error(
-      '[LivebuyUI] addToCartRequester not wired — the host must inject it (it owns the configured shopId).',
-    ),
-  );
+// rn-add-to-cart-default-requester-template / rn-add-to-cart-channel-shop-id-template — default
+// add-to-cart requester (route B). Parity iOS `TemplateAttachment.swift` / Android
+// `TemplateAttachment.kt` / Flutter `default_template.dart`: the view-model layer wires core
+// `LivebuySDK.addToCart` itself (the template NEVER builds HTTP). The shop id is the current
+// channel's (`channelShopId`, read from the template instance — hence a factory built per
+// template, not a module constant), else the configured one (`LivebuySDK.currentShopId()`);
+// none → reject without reaching the bridge (see `makeCoreAddToCartRequester`). Same lazy-require
+// seam as defaultSetAwaitGoods (the value import pulls in NativeModules, unavailable in node/jest);
+// the requester is async, so a require failure becomes a rejection (→ `addToCartFailed`).
+function makeDefaultAddToCartRequester(channelShopId: () => string): CartAddRequester {
+  return makeCoreAddToCartRequester({
+    channelShopId,
+    configuredShopId: () => {
+      const { LivebuySDK } = require('livebuy-react-native');
+      return LivebuySDK.currentShopId();
+    },
+    addToCart: (options) => {
+      const { LivebuySDK } = require('livebuy-react-native');
+      return LivebuySDK.addToCart(options);
+    },
+  });
+}
 
 // live-bid-rn-template — default bid / bid-confirm requesters. Same lazy-require seam as
 // defaultSetAwaitGoods (the value import pulls in NativeModules, unavailable in node/jest);
-// tests inject Capturing* fakes and never reach these. Unlike add-to-cart, `placeBid` needs no
-// host-owned shopId, so the default wires core directly. A request without a numeric goodsId or a
+// tests inject Capturing* fakes and never reach these. `placeBid` needs no shopId. A request without a numeric goodsId or a
 // tracked videoId rejects (→ `failed(null)`), parity Android's wiring guard.
 const defaultBidRequester: BidRequester = (request: LBBidRequest) => {
   if (!Number.isInteger(request.goodsId) || request.videoId == null) {
@@ -303,7 +312,7 @@ const defaultBidConfirmRequester: BidConfirmRequester = (videoId, buyingIds) => 
  * Pure classifier (parity iOS/Android `isAddToCartAuthRequired`): `true` only for the core
  *「needs login」signal — the documented `LBError` `{ type: 'serverError', code: 401 }` (raised
  * for an empty `buy_no`). `false` for every other rejection (other server codes / network /
- * the「not wired」default / plain Errors). `code` is tolerated as number or numeric string.
+ * the「no shopId」default / plain Errors). `code` is tolerated as number or numeric string.
  * Extracted so the route-B catch's branching is unit-testable in isolation.
  */
 export function isAddToCartAuthRequired(error: unknown): boolean {
@@ -750,6 +759,15 @@ export class DefaultPlayerTemplate {
    * headless 單元測試時為空陣列。
    */
   private currentOtherGoods: readonly LBProduct[] = [];
+  /**
+   * 當前頻道的商家 id（`LBPlayerChannelInfo.shopId`，rn-add-to-cart-channel-shop-id-template）。
+   * RN 沒有 `ingestChannel()`，由 host／容器透過 {@link handleChannelShopId} 在每次
+   * `onChannelChange` 餵入，換片時被新頻道的值覆寫。預設加購 requester 每次加購時讀取；
+   * 空字串＝沒有，改用 `LivebuySDK.currentShopId()`。刻意不在 {@link clear} 重設：
+   * `VIDEO_SWITCH`（→ `clear()`）與 `onChannelChange` 的先後沒有保證，重設可能抹掉新頻道
+   * 剛餵入的值；而每次 `onChannelChange` 都會覆寫，舊值不會留到新頻道之後。
+   */
+  private currentChannelShopId = '';
   private readonly variantPicker = new DefaultVariantPicker();
   private readonly qtyStepper = new DefaultQtyStepper();
   private readonly miniCart = new DefaultMiniCart();
@@ -1042,9 +1060,13 @@ export class DefaultPlayerTemplate {
     /**
      * product-sheet-stack-template — route-B add-to-cart requester. The Default
      * template delegates `addToCart()` to `LivebuySDK.addToCart` (route B → the
-     * `LBCartResult`; the template NEVER builds HTTP). The host wires the real
-     * requester (it owns the configured `shopId`); when omitted the default
-     * rejects (the add is inert). Injectable so unit tests capture the request.
+     * `LBCartResult`; the template NEVER builds HTTP). When omitted, the default
+     * calls core `LivebuySDK.addToCart` with the current channel's shop id
+     * ({@link handleChannelShopId}), else the configured one
+     * (`LivebuySDK.currentShopId()`), rejecting without a bridge call when there is
+     * neither (rn-add-to-cart-default-requester-template /
+     * rn-add-to-cart-channel-shop-id-template). A host-injected requester
+     * wins. Injectable so unit tests capture the request.
      */
     addToCartRequester?: CartAddRequester;
     /**
@@ -1143,7 +1165,9 @@ export class DefaultPlayerTemplate {
     // product-sheet-stack-template — wire the route-B add-to-cart requester
     // (default = lazy-required `LivebuySDK.addToCart`; the template itself never
     // builds HTTP, headless write contract) + the host-takeover flag.
-    this.addToCartRequester = params.addToCartRequester ?? defaultAddToCartRequester;
+    this.addToCartRequester =
+      params.addToCartRequester ??
+      makeDefaultAddToCartRequester(() => this.currentChannelShopId);
     // rn-add-to-cart-login-gate-template — wire the login-state / policy providers
     // (default = lazy-required LivebuySDK methods, same seam as addToCartRequester above).
     this.isLoggedInProvider = params.isLoggedInProvider ?? defaultIsLoggedIn;
@@ -2499,6 +2523,20 @@ export class DefaultPlayerTemplate {
    */
   handleOtherGoods(otherGoods: readonly LBProduct[] | undefined | null): void {
     this.currentOtherGoods = otherGoods ?? [];
+  }
+
+  /**
+   * rn-add-to-cart-channel-shop-id-template — host-fed current channel shop id
+   * (`LBPlayerChannelInfo.shopId` from `<LivebuyPlayerCore onChannelChange>`). RN has NO
+   * `ingestChannel()`, so this is host-fed exactly like {@link handleHeaderChrome} /
+   * {@link handleOtherGoods}. Each call overwrites the previous value (a video switch feeds
+   * the new channel's id); `""` / blank means "none". Cached only (no notify) — the default
+   * add-to-cart requester reads it on every add and prefers it over
+   * `LivebuySDK.currentShopId()` (parity iOS / Android `channel.shop.id`). A host-injected
+   * `addToCartRequester` ignores it.
+   */
+  handleChannelShopId(shopId: string | undefined | null): void {
+    this.currentChannelShopId = shopId ?? '';
   }
 
   /**

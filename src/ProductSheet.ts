@@ -19,17 +19,24 @@
 //
 // RN wiring note (design D5 / D7 — injected requester, parity with
 // `GoodsTrackingSetter`): the add-to-cart delegation (`LivebuySDK.addToCart`) is
-// injected as a callback (default no-op) EXACTLY like the goods-tracking
+// injected as a callback EXACTLY like the goods-tracking
 // `setAwaitGoods` / `setNoticeGoods` delegates — so the model itself never builds
 // an HTTP request and stays unit-testable headless in jest (no native bridge).
-// The host (which owns the player ref + the configured `shopId`) wires the real
-// requester at attach time.
+// When the host injects none, the Default template wires core `LivebuySDK.addToCart` with the
+// current channel's `shopId`, falling back to the configured one
+// (rn-add-to-cart-default-requester-template / rn-add-to-cart-channel-shop-id-template).
 //
 // Each mutator RETURNS `boolean` (= "did this actually change") so the owning
 // template coalesces exactly ONE notification per single state mutation (parity
 // with `MomentState` / `GoodsTracking` / `ErrorState`).
 
-import type { LBProduct, LBSpec, LBSpecOption, LBAddToCartResult } from 'livebuy-react-native';
+import type {
+  LBProduct,
+  LBSpec,
+  LBSpecOption,
+  LBAddToCartOptions,
+  LBAddToCartResult,
+} from 'livebuy-react-native';
 import { isBuyButtonHidden } from './LiveBid';
 
 // ---------------------------------------------------------------------------
@@ -38,8 +45,8 @@ import { isBuyButtonHidden } from './LiveBid';
 
 /**
  * The template-built route-B add-to-cart request. `shopId` / `guest_id` / login
- * token / `lang` are injected by the core requester (the host wires the real
- * `LivebuySDK.addToCart`, which knows the configured `shopId`); the template only
+ * token / `lang` are added by the requester / core (the default requester adds the
+ * channel's — else the configured — `shopId`, see {@link makeCoreAddToCartRequester}); the template only
  * supplies the per-tap selection. `specificationId` is omitted for a no-spec
  * product (D5).
  */
@@ -61,9 +68,74 @@ export interface CartAddRequest {
  * Host-wired delegate for an add-to-cart intent → core route-B
  * `LivebuySDK.addToCart`. Returns the route-B `LBCartResult`. The template NEVER
  * builds HTTP itself (headless write contract; parity with `GoodsTrackingSetter`).
- * The default is a no-op (rejects) so headless unit tests inject a fake.
+ * When the host injects none, the Default template uses {@link makeCoreAddToCartRequester}
+ * wired to core; unit tests inject a fake.
  */
 export type CartAddRequester = (request: CartAddRequest) => Promise<LBAddToCartResult>;
+
+/** Non-blank string → itself; anything else → `null`. */
+function nonBlankShopId(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') return null;
+  return value.trim().length > 0 ? value : null;
+}
+
+/**
+ * rn-add-to-cart-channel-shop-id-template — PURE: the shop id the default requester sends to
+ * core `LivebuySDK.addToCart`. Order (parity iOS / Android `channel.shop.id`):
+ * 1. the current channel's shop id (host-fed via `DefaultPlayerTemplate.handleChannelShopId`,
+ *    from `LBPlayerChannelInfo.shopId`), when non-blank;
+ * 2. otherwise the configured shop (`LivebuySDK.currentShopId()`, the `shopId` last passed to
+ *    `configure()`), when non-blank;
+ * 3. otherwise `null` (the caller MUST NOT reach the bridge with it).
+ * `undefined` / `null` / blank count as "none" for both inputs.
+ */
+export function resolveAddToCartShopId(
+  channelShopId: string | null | undefined,
+  configuredShopId: string | null | undefined,
+): string | null {
+  return nonBlankShopId(channelShopId) ?? nonBlankShopId(configuredShopId);
+}
+
+/** Side-effect seams of {@link makeCoreAddToCartRequester} (production = lazy-required core). */
+export interface CoreAddToCartDeps {
+  /**
+   * Reads the current channel's shop id (production: the template's host-fed
+   * `handleChannelShopId` value; `""` until fed).
+   */
+  readonly channelShopId: () => string | null | undefined;
+  /** Reads the configured shop id (production: `LivebuySDK.currentShopId`). */
+  readonly configuredShopId: () => string | null | undefined;
+  /** Core route-B add (production: `LivebuySDK.addToCart`). */
+  readonly addToCart: (options: LBAddToCartOptions) => Promise<LBAddToCartResult>;
+}
+
+/**
+ * rn-add-to-cart-default-requester-template / rn-add-to-cart-channel-shop-id-template — the
+ * default route-B requester (parity iOS `TemplateAttachment` / Android `TemplateAttachment.kt` /
+ * Flutter `default_template.dart`, which all wire core `addToCart` in the view-model layer).
+ * Resolves the shop id per call ({@link resolveAddToCartShopId}: channel first, then the
+ * configured shop), then forwards
+ * `goodsId` / `num` / `specificationId` / `videoId` unchanged. No shop id → rejects WITHOUT calling
+ * `addToCart` (the template's catch then raises `addToCartFailed`). Core's typed rejections pass
+ * through untouched, so the dedupe / needs-login / failure branches keep working.
+ */
+export function makeCoreAddToCartRequester(deps: CoreAddToCartDeps): CartAddRequester {
+  return async (request: CartAddRequest) => {
+    const shopId = resolveAddToCartShopId(deps.channelShopId(), deps.configuredShopId());
+    if (shopId == null) {
+      throw new Error(
+        '[LivebuyUI] addToCart needs a shopId — feed the channel shop id (handleChannelShopId), call LivebuySDK.configure({ shopId }), or inject addToCartRequester.',
+      );
+    }
+    return deps.addToCart({
+      shopId,
+      goodsId: request.goodsId,
+      num: request.num,
+      ...(request.specificationId !== undefined ? { specificationId: request.specificationId } : {}),
+      ...(request.videoId !== undefined ? { videoId: request.videoId } : {}),
+    });
+  };
+}
 
 // ---------------------------------------------------------------------------
 // 1. product-detail — mirrors the relevant LBProduct fields (D1).
