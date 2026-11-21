@@ -87,6 +87,17 @@ import {
   type LBCartCTAState,
 } from './ProductSheet';
 import { DefaultPlayerNavigation, type LBPlayerNavigationState } from './PlayerNavigation';
+import {
+  DefaultBidWon,
+  bidWonItemFromParams,
+  classifyBidRejection,
+  effectiveLimitNum,
+  isBuyButtonHidden,
+  type BidConfirmRequester,
+  type BidRequester,
+  type LBBidOutcome,
+  type LBBidRequest,
+} from './LiveBid';
 import { ChangeEmitter, type ChangeListener, type Unsubscribe } from './ChangeEmitter';
 import {
   DefaultWidgetContent,
@@ -262,6 +273,31 @@ const defaultAddToCartRequester: CartAddRequester = () =>
       '[LivebuyUI] addToCartRequester not wired — the host must inject it (it owns the configured shopId).',
     ),
   );
+
+// live-bid-rn-template — default bid / bid-confirm requesters. Same lazy-require seam as
+// defaultSetAwaitGoods (the value import pulls in NativeModules, unavailable in node/jest);
+// tests inject Capturing* fakes and never reach these. Unlike add-to-cart, `placeBid` needs no
+// host-owned shopId, so the default wires core directly. A request without a numeric goodsId or a
+// tracked videoId rejects (→ `failed(null)`), parity Android's wiring guard.
+const defaultBidRequester: BidRequester = (request: LBBidRequest) => {
+  if (!Number.isInteger(request.goodsId) || request.videoId == null) {
+    return Promise.reject(new Error('[LivebuyUI] placeBid needs a numeric goodsId and a videoId'));
+  }
+  const { LivebuySDK } = require('livebuy-react-native');
+  return LivebuySDK.placeBid({
+    videoId: request.videoId,
+    goodsId: request.goodsId,
+    num: request.num,
+    ...(request.specificationId !== undefined ? { specificationId: request.specificationId } : {}),
+  });
+};
+const defaultBidConfirmRequester: BidConfirmRequester = (videoId, buyingIds) => {
+  const { LivebuySDK } = require('livebuy-react-native');
+  // Fire-and-forget (same as the web): a failure is only logged, the window stays closed.
+  void Promise.resolve(LivebuySDK.confirmBidWin(videoId, buyingIds)).catch((e: unknown) => {
+    if (__DEV__) console.log('[DefaultTemplate] confirmBidWin failed', e);
+  });
+};
 
 /**
  * Pure classifier (parity iOS/Android `isAddToCartAuthRequired`): `true` only for the core
@@ -770,6 +806,20 @@ export class DefaultPlayerTemplate {
   private currentVideoIdValue: string | null = null;
   /** "請選規格" flag (host prompts the user to pick a variant before adding). */
   private selectSpecRequiredFlag = false;
+  /** live-bid-rn-template — 搶購場直播中 {@link addToCart} 的下標 requester（預設 `LivebuySDK.placeBid`）。 */
+  private readonly bidRequester: BidRequester;
+  /** live-bid-rn-template — 得標視窗「確定」的確認 requester（預設 `LivebuySDK.confirmBidWin`）。 */
+  private readonly bidConfirmRequester: BidConfirmRequester;
+  /** live-bid-rn-template — 最近一次下標結果（見 {@link bidOutcome}）。 */
+  private bidOutcomeValue: LBBidOutcome | null = null;
+  /** live-bid-rn-template — 開啟中明細的商品層 `limitNum`，供選規格時回退。 */
+  private detailProductLimitNum = 0;
+  /**
+   * 「恭喜搶購成功」視窗狀態（live-bid-rn-template，parity iOS / Android `template.bidWon`），由 core
+   * `BID_WON` 經 `TemplateAttachment` 餵入。host 綁 `items` / `isPresented`，按鈕呼叫
+   * {@link confirmBidWin} / {@link dismissBidWon}。
+   */
+  readonly bidWon = new DefaultBidWon();
   /** Player-bound guest-rename action (host wires the player ref's rename exit). */
   private readonly guestNameEditAction?: () => void;
   /**
@@ -1060,6 +1110,16 @@ export class DefaultPlayerTemplate {
      */
     requestBeginScrub?: () => void;
     requestEndScrub?: () => void;
+    /**
+     * live-bid-rn-template — 搶購場直播中 {@link addToCart} 的下標 requester。預設 lazy-required
+     * `LivebuySDK.placeBid`；測試注入 fake。
+     */
+    bidRequester?: BidRequester;
+    /**
+     * live-bid-rn-template — 得標視窗「確定」的確認 requester `(videoId, buyingIds)`。預設 lazy-required
+     * `LivebuySDK.confirmBidWin`（fire-and-forget）；測試注入 fake。
+     */
+    bidConfirmRequester?: BidConfirmRequester;
   }) {
     this.effectiveConfig = new EffectiveConfig(params.sdkConfig, params.hostOptions);
     this.onDismiss = params.onDismiss;
@@ -1099,6 +1159,9 @@ export class DefaultPlayerTemplate {
     // forwards the player ref's `load(videoId)`; the template never touches the
     // bridge). Undefined → the navigate forwarders are safe no-ops.
     this.loadVideo = params.loadVideo;
+    // live-bid-rn-template — wire the bid / bid-confirm requesters (default = lazy-required core).
+    this.bidRequester = params.bidRequester ?? defaultBidRequester;
+    this.bidConfirmRequester = params.bidConfirmRequester ?? defaultBidConfirmRequester;
     // #3 — surface backend layout keys this template version doesn't recognise.
     logUnknownLayoutKeys('player', params.sdkConfig.layout?.player, KNOWN_PLAYER_LAYOUT_KEYS);
   }
@@ -2402,6 +2465,9 @@ export class DefaultPlayerTemplate {
     // (channel-flash-sale-flag-template-rn). pass-through to playerHeader; 純資料，
     // template 不做任何 UI 決策.
     isFlashSale?: boolean;
+    // 直播管家搶購場 flag — host-fed passthrough of `channel.saleKeywordRequired`
+    // (live-bid-rn-template). `true` + 商品 saleKeyword 空 → 明細 buyButtonHidden.
+    saleKeywordRequired?: boolean;
   }): void {
     if (this.playerHeader.handleHeaderChrome(fields)) this.notifyChange();
   }
@@ -2680,6 +2746,10 @@ export class DefaultPlayerTemplate {
     // cart-add-loading-state-rn: 換片 / 重置清除 in-flight。
     this.addToCartInFlightFlag = false;
     this.selectSpecRequiredFlag = false;
+    // live-bid-rn-template — 換片後 MUST NOT 殘留上一支影片的得標視窗 / 下標結果。
+    this.bidWon.clear();
+    this.bidOutcomeValue = null;
+    this.detailProductLimitNum = 0;
     // chat-history-dedupe — 換片後新場的第一批 backlog 應能正常 ingest（feed 已 clear、旗標 reset → 乾淨）。
     this.hasIngestedBacklog = false;
     // rn-chat-push-id-dedupe-template — 換片後新場的 id 不與前一場撞名。
@@ -2771,20 +2841,39 @@ export class DefaultPlayerTemplate {
     // PRODUCT_CLICK params are light); a bare {diversionUrl} payload has no id.
     if (product == null || product.id === undefined) return;
     const full = product as LBProduct;
-    const detail = this.productSheet.openDetail(full, this.currentOtherGoods);
+    // live-bid-rn-template: bidMode / saleKeywordRequired 決定 bidWaiting / limitNum /
+    // buyButtonHidden（開啟時快照，同網頁開面板時判斷）。
+    const bidMode = this.isBidMode;
+    const detail = this.productSheet.openDetail(full, this.currentOtherGoods, {
+      bidMode,
+      saleKeywordRequired: this.playerHeader.current.saleKeywordRequired,
+    });
     // DIFF-THEN-NOTIFY (parity with iOS): re-tapping the SAME product while its
     // sheet is still open is a no-op (no variant/qty reset, no notification). A
     // genuine open (new product, or re-open after `closeProductDetail()`) resets
     // the variant/qty state and fires ONE coalesced notification.
-    if (!this.productSheet.lastOpenChanged) return;
+    if (!this.productSheet.lastOpenChanged) {
+      // live-bid-rn-template（parity iOS openProductDetail / Android handleProductTap）：同商品重點、
+      // 明細仍開著時也清掉上一次的下標結果（其他旗標維持既有 no-op 語意）。
+      if (this.bidOutcomeValue !== null) {
+        this.bidOutcomeValue = null;
+        this.notifyChange();
+      }
+      return;
+    }
     this.variantPicker.reset(detail.specOptions, detail.specifications);
+    // live-bid-rn-template: 搶購場直播中以有效每人限購收斂數量上限（規格層優先）。
+    this.detailProductLimitNum = full.limitNum ?? 0;
+    const limit = effectiveLimitNum(this.detailProductLimitNum, this.variantPicker.selectedSpec, bidMode);
+    this.productSheet.updateLimitNum(limit);
     // qty bounds from the selected spec (none yet) → fall back to product stock.
-    this.qtyStepper.recomputeBounds(detail.stock, detail.soldOut, /* keepQty */ false);
+    this.qtyStepper.recomputeBounds(detail.stock, detail.soldOut, /* keepQty */ false, limit);
     this.addToCartFailedFlag = false;
     this.addToCartNeedsLoginFlag = false;
     // cart-add-loading-state-rn: 開新詳情清除 stale in-flight（與 failure / needs-login 旗標並列）。
     this.addToCartInFlightFlag = false;
     this.selectSpecRequiredFlag = false;
+    this.bidOutcomeValue = null;
     this.notifyChange();
   }
 
@@ -2880,7 +2969,10 @@ export class DefaultPlayerTemplate {
     const detail = this.productSheet.detail;
     const stock = spec ? spec.stock : (detail?.stock ?? 0);
     const soldOut = detail?.soldOut ?? 0;
-    this.qtyStepper.recomputeBounds(stock, soldOut, /* keepQty */ true);
+    // live-bid-rn-template: 依新選規格重算有效每人限購（規格 > 0 優先，否則商品層）。
+    const limit = effectiveLimitNum(this.detailProductLimitNum, spec, this.isBidMode);
+    this.productSheet.updateLimitNum(limit);
+    this.qtyStepper.recomputeBounds(stock, soldOut, /* keepQty */ true, limit);
     // A fresh valid selection clears the 請選規格 prompt.
     if (this.variantPicker.selectedSpec !== null) this.selectSpecRequiredFlag = false;
     this.notifyChange();
@@ -2966,6 +3058,14 @@ export class DefaultPlayerTemplate {
    */
   async addToCart(): Promise<void> {
     if (this.hostOwnsCart) return; // route A owns it — no route-B delegation.
+    // live-bid-rn-template（parity iOS / Android 順序）：有明細時先重設這次嘗試的結果旗標
+    // （addToCartFailed / addToCartNeedsLogin / bidOutcome），再判斷隱藏購買鈕——直播管家商品沒設
+    // 搶購關鍵字 → intent 不動作（同網頁）。旗標若有被清掉，在之後不另外通知的守門 return 路徑補通知一次。
+    const flagsCleared = this.resetAttemptFlags();
+    if (this.productSheet.detail?.buyButtonHidden === true) {
+      if (flagsCleared) this.notifyChange();
+      return;
+    }
     // rn-add-to-cart-login-gate-template：全域「加購前必須登入」政策開啟且未登入 → 本地攔截，
     // 完全不委派 addToCartRequester。刻意排在 hostOwnsCart 之後（host 接管時 SDK 完全不該做
     // 任何事）、sold-out / 選規格守門之前（parity iOS/Android：使用者連自己有沒有資格結帳都
@@ -2986,15 +3086,24 @@ export class DefaultPlayerTemplate {
     }
     const detail = this.productSheet.detail;
     if (detail == null) return;
-    if (this.qtyStepper.max === 0) return; // 缺貨 — blocked.
+    if (this.qtyStepper.max === 0) {
+      // 缺貨 — blocked.
+      if (flagsCleared) this.notifyChange();
+      return;
+    }
     const hasGroups = this.variantPicker.groups.length > 0;
     const selectedSpec = this.variantPicker.selectedSpec;
     if (hasGroups && selectedSpec === null) {
       // 未選齊規格 — block + surface the 請選規格 flag.
-      if (!this.selectSpecRequiredFlag) {
+      if (!this.selectSpecRequiredFlag || flagsCleared) {
         this.selectSpecRequiredFlag = true;
         this.notifyChange();
       }
+      return;
+    }
+    // live-bid-rn-template: 搶購場直播中 → 下標取代加購（不打 addcart、不動購物車計數 / mini-cart）。
+    if (this.isBidMode) {
+      await this.placeBid(detail);
       return;
     }
     // New attempt — clear BOTH transient flags before the request so the reference-ui
@@ -3056,6 +3165,107 @@ export class DefaultPlayerTemplate {
       this.addToCartInFlightFlag = false;
       this.notifyChange();
     }
+  }
+
+  // MARK: - 搶購下標（live-bid-rn-template，parity iOS live-bid-ios-template / Android live-bid-android-template）
+
+  /**
+   * PURE（parity iOS / Android `isBuyButtonHidden`）：直播管家搶購場需要關鍵字而這個商品沒設 → 隱藏購買鈕。
+   * 商品明細狀態與商品列表的加購捷徑共用這個判斷。module 層同名函式見 `LiveBid.isBuyButtonHidden`。
+   */
+  static isBuyButtonHidden(product: Pick<LBProduct, 'saleKeyword'>, saleKeywordRequired: boolean): boolean {
+    return isBuyButtonHidden(product, saleKeywordRequired);
+  }
+
+  /**
+   * 搶購下標結果（parity iOS / Android `bidOutcome`）。搶購場直播中 {@link addToCart} 改走下標：成功
+   * `{ type: 'placed' }`（商品明細同時關閉）、後端錯誤 `{ type: 'failed', code }`。每次新的
+   * {@link addToCart}（有明細時）與開啟商品明細時重設為 `null`；換片清空。一般加購路徑恆為 `null`。
+   */
+  get bidOutcome(): LBBidOutcome | null {
+    return this.bidOutcomeValue;
+  }
+
+  /** 搶購場直播中（`playerHeaderState.isFlashSale && isLive`）：{@link addToCart} 改走下標。 */
+  private get isBidMode(): boolean {
+    const header = this.playerHeader.current;
+    return header.isFlashSale && header.isLive;
+  }
+
+  /**
+   * {@link addToCart} 開頭：有明細時重設 addToCartFailed / addToCartNeedsLogin / bidOutcome，回傳是否有
+   * 旗標被清掉（呼叫端在不另外通知的 return 路徑補通知）。無明細 → 不動、回傳 false。
+   */
+  private resetAttemptFlags(): boolean {
+    if (this.productSheet.detail == null) return false;
+    const changed =
+      this.addToCartFailedFlag || this.addToCartNeedsLoginFlag || this.bidOutcomeValue !== null;
+    this.addToCartFailedFlag = false;
+    this.addToCartNeedsLoginFlag = false;
+    this.bidOutcomeValue = null;
+    return changed;
+  }
+
+  /** {@link addToCart} 的下標分支：in-flight → 注入的 bid requester → {@link applyBidResult}。 */
+  private async placeBid(detail: LBProductDetailState): Promise<void> {
+    this.selectSpecRequiredFlag = false;
+    this.addToCartInFlightFlag = true;
+    this.notifyChange();
+    const specId = this.variantPicker.selectedSpecificationId;
+    const request: LBBidRequest = {
+      goodsId: Number(detail.productId),
+      num: this.qtyStepper.qty,
+      ...(specId != null ? { specificationId: Number(specId) } : {}),
+      ...(this.currentVideoIdValue != null ? { videoId: this.currentVideoIdValue } : {}),
+    };
+    try {
+      await this.bidRequester(request);
+    } catch (e) {
+      this.applyBidRejection(e);
+      return;
+    }
+    this.applyBidPlaced();
+  }
+
+  /** 下標成功 → placed + 關閉商品明細，一次通知。MUST NOT 動 mini-cart / cartCTA / addToCartFailed。 */
+  private applyBidPlaced(): void {
+    this.addToCartInFlightFlag = false;
+    this.bidOutcomeValue = { type: 'placed' };
+    this.productSheet.clearDetail();
+    this.notifyChange();
+  }
+
+  /**
+   * 下標 reject → 狀態，一次通知。deduplicated → 只結束 in-flight；needsLogin → addToCartNeedsLogin；
+   * 其他 → failed（帶後端代碼）。MUST NOT 動 mini-cart / cartCTA / addToCartFailed。
+   */
+  private applyBidRejection(error: unknown): void {
+    this.addToCartInFlightFlag = false;
+    const rejection = classifyBidRejection(error);
+    if (rejection.type === 'needsLogin') this.addToCartNeedsLoginFlag = true;
+    if (rejection.type === 'failed') this.bidOutcomeValue = { type: 'failed', code: rejection.code };
+    this.notifyChange();
+  }
+
+  /**
+   * core `BID_WON`（ordered / failed 皆是）→ 得標視窗。沒有 `buying_id` → 忽略。由
+   * `TemplateAttachment.routeEvent` 呼叫（通知型事件，不影響 host 自己的 listener）。
+   */
+  handleBidWon(params: Record<string, unknown>): void {
+    const item = bidWonItemFromParams(params);
+    if (item === null) return;
+    if (this.bidWon.record(item)) this.notifyChange();
+  }
+
+  /** host 在得標視窗按「確定」：以全部 `buyingId` 呼叫確認 requester 一次，然後清空關閉。 */
+  confirmBidWin(): void {
+    const videoId = this.currentVideoIdValue ?? '';
+    if (this.bidWon.confirm((ids) => this.bidConfirmRequester(videoId, ids))) this.notifyChange();
+  }
+
+  /** host 在得標視窗按「取消」：只清空關閉，不確認。 */
+  dismissBidWon(): void {
+    if (this.bidWon.clear()) this.notifyChange();
   }
 
   // Layout well-known keys (Task 7.7)

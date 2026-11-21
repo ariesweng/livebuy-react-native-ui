@@ -150,6 +150,8 @@ export type {
   LBCartCTAState,
   CartAddRequest,
   CartAddRequester,
+  // live-bid-rn-template — openDetail 的搶購場脈絡參數。
+  LBDetailBidContext,
 } from './ProductSheet';
 
 // reconcile-activity-notification-contract-template §2 / §3 / §4 — win claim flow
@@ -170,3 +172,20 @@ export type {
   RequestAwardClaimWithContact,
   RequestAwardClaim,
 } from './AwardClaimFlow';
+
+// live-bid-rn-template — 搶購下標結果、得標視窗狀態與純函式（parity iOS / Android live-bid template）。
+export {
+  DefaultBidWon,
+  bidWonItemFromParams,
+  classifyBidRejection,
+  effectiveLimitNum,
+  isBuyButtonHidden,
+} from './LiveBid';
+export type {
+  BidConfirmRequester,
+  BidRejection,
+  BidRequester,
+  LBBidOutcome,
+  LBBidRequest,
+  LBBidWonItem,
+} from './LiveBid';

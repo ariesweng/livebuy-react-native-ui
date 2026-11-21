@@ -13,6 +13,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.16.0] - 2026-11-21
+
+> **view-model，minor。** peer `livebuy-react-native` `^2.12.2` → `^2.13.0`。
+> **驗證範圍**：`npx jest` 通過。**未經真機實測。**
+
+### Added
+
+- **搶購下標**（`live-bid-rn-template`，對齊 iOS／Android view-model）：搶購場直播中 `addToCart()` 改呼叫下標（預設接
+  `LivebuySDK.placeBid`），結果寫入 `bidOutcome`；商品明細新增 `bidWaiting`、`limitNum`、`buyButtonHidden`，有限購時數量上限為
+  `min(庫存, limitNum)`；直播管家搶購場沒有搶購關鍵字的商品隱藏購買鈕；得標視窗狀態 `bidWon`，`confirmBidWin()` 確認全部後關閉、
+  `dismissBidWon()` 只關閉。非搶購場、非直播中行為不變。
+
 ## [1.15.2] - 2026-10-16
 
 > **純 metadata 版號 bump，零內容變動。** peer `livebuy-react-native` `^2.12.1` → `^2.12.2`（`check-ui-package-versions.sh` 要求精確對齊）。

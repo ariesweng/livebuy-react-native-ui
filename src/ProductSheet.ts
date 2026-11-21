@@ -30,6 +30,7 @@
 // with `MomentState` / `GoodsTracking` / `ErrorState`).
 
 import type { LBProduct, LBSpec, LBSpecOption, LBAddToCartResult } from 'livebuy-react-native';
+import { isBuyButtonHidden } from './LiveBid';
 
 // ---------------------------------------------------------------------------
 // Add-to-cart requester (injected delegate; route B → LBCartResult).
@@ -161,7 +162,38 @@ export interface LBProductDetailState {
    * expose-other-goods-recommendations-template design.md D1)。無 channel 情境時為空陣列。
    */
   readonly recommendations: readonly LBProductRecommendation[];
+  /**
+   * 搶購場直播中且本人已搶購（`LBProduct.buyingNum > 0`）→ 顯示「正在等待結果...」
+   * （live-bid-rn-template，parity iOS / Android）。其他情況 `false`。開啟時快照。
+   *
+   * 這三個搶購欄位型別為 optional：template 產生的明細**恆帶值**；optional 只是為了讓下游手寫的
+   * `LBProductDetailState` 物件字面值（例如 reference-ui 的 demo seed / 測試 fixture）維持源碼相容
+   * （iOS / Android 以參數預設值達成同一件事）。讀取端缺值視為 `false` / `0`。
+   */
+  readonly bidWaiting?: boolean;
+  /**
+   * 搶購場直播中的每人限購：已選規格且規格 `limitNum > 0` 取規格值，否則取商品值；`0` = 不限購或非
+   * 搶購場直播中（live-bid-rn-template）。數量上限已依此收斂；選規格時重算。
+   */
+  readonly limitNum?: number;
+  /**
+   * 直播管家搶購場（`playerHeaderState.saleKeywordRequired`）且商品沒設搶購關鍵字 → 隱藏購買鈕，
+   * `addToCart()` 不動作（live-bid-rn-template，同網頁）。不綁直播狀態。
+   */
+  readonly buyButtonHidden?: boolean;
 }
+
+/**
+ * 開啟商品明細時的搶購場脈絡（live-bid-rn-template）。`bidMode` = 搶購場直播中
+ * （`isFlashSale && isLive`）、`saleKeywordRequired` = `playerHeaderState.saleKeywordRequired`。
+ * 省略 = 兩者皆 `false`（既有呼叫端 / 非搶購場的明細與之前相同）。
+ */
+export interface LBDetailBidContext {
+  readonly bidMode: boolean;
+  readonly saleKeywordRequired: boolean;
+}
+
+const NO_BID_CONTEXT: LBDetailBidContext = { bidMode: false, saleKeywordRequired: false };
 
 /**
  * Map an `LBProduct` → product-detail snapshot. `otherGoods` is the current
@@ -169,7 +201,11 @@ export interface LBProductDetailState {
  * headless unit test) — mapped into `recommendations` via {@link
  * recommendationsFromOtherGoods}. Pure.
  */
-function detailFromProduct(p: LBProduct, otherGoods: readonly LBProduct[] = []): LBProductDetailState {
+function detailFromProduct(
+  p: LBProduct,
+  otherGoods: readonly LBProduct[] = [],
+  bid: LBDetailBidContext = NO_BID_CONTEXT,
+): LBProductDetailState {
   return {
     productId: p.id,
     name: p.name,
@@ -182,6 +218,10 @@ function detailFromProduct(p: LBProduct, otherGoods: readonly LBProduct[] = []):
     specifications: p.specifications ?? [],
     specOptions: p.specOptions ?? [],
     recommendations: recommendationsFromOtherGoods(otherGoods, p.id),
+    // live-bid-rn-template — limitNum 先填商品層值，規格層優先由 template 經 updateLimitNum 重算。
+    bidWaiting: bid.bidMode && (p.buyingNum ?? 0) > 0,
+    limitNum: bid.bidMode ? (p.limitNum ?? 0) : 0,
+    buyButtonHidden: isBuyButtonHidden(p, bid.saleKeywordRequired),
   };
 }
 
@@ -227,7 +267,10 @@ function detailEquals(a: LBProductDetailState, b: LBProductDetailState): boolean
     a.soldOut === b.soldOut &&
     a.photos.length === b.photos.length &&
     a.photos.every((v, i) => v === b.photos[i]) &&
-    recommendationsEqual(a.recommendations, b.recommendations)
+    recommendationsEqual(a.recommendations, b.recommendations) &&
+    a.bidWaiting === b.bidWaiting &&
+    a.limitNum === b.limitNum &&
+    a.buyButtonHidden === b.buyButtonHidden
   );
 }
 
@@ -256,10 +299,15 @@ export class DefaultProductSheet {
    * object identity is preserved so the owning template coalesces no change. The
    * companion {@link closeProductDetail} clears the sheet so a later re-open of the
    * same product DOES surface (mirrors iOS — a closed sheet re-opens on the same tap).
+   * `bid`（live-bid-rn-template）決定 `bidWaiting` / `limitNum` / `buyButtonHidden`；省略 = 非搶購場。
    * @internal
    */
-  openDetail(product: LBProduct, otherGoods: readonly LBProduct[] = []): LBProductDetailState {
-    const next = detailFromProduct(product, otherGoods);
+  openDetail(
+    product: LBProduct,
+    otherGoods: readonly LBProduct[] = [],
+    bid: LBDetailBidContext = NO_BID_CONTEXT,
+  ): LBProductDetailState {
+    const next = detailFromProduct(product, otherGoods, bid);
     if (this._detail !== null && detailEquals(this._detail, next)) {
       // Same product, sheet still open → no-op (keep the existing snapshot identity).
       this._lastOpenChanged = false;
@@ -280,6 +328,17 @@ export class DefaultProductSheet {
     return this._lastOpenChanged;
   }
   private _lastOpenChanged = false;
+
+  /**
+   * 以新的 `limitNum` 取代目前明細的值（選規格改變了有效限購，live-bid-rn-template）。無明細或同值 →
+   * no-op。回傳是否變更。@internal
+   */
+  updateLimitNum(value: number): boolean {
+    const current = this._detail;
+    if (current === null || current.limitNum === value) return false;
+    this._detail = { ...current, limitNum: value };
+    return true;
+  }
 
   /** Close the sheet. Returns whether it changed. @internal */
   clearDetail(): boolean {
@@ -483,9 +542,10 @@ export class DefaultQtyStepper {
    *   soldOut==1 || stock<=0 → { qty:0, min:0, max:0 } (host draws 缺貨)
    *   otherwise              → min=1, max=stock, qty re-clamped into [1, stock]
    * `keepQty` (variant switch) re-clamps the current qty; otherwise qty resets to
-   * `min`. Returns whether the snapshot changed. @internal
+   * `min`. `limit > 0`（搶購每人限購，live-bid-rn-template）時 `max = min(stock, limit)`；預設 0 維持
+   * 只看庫存。Returns whether the snapshot changed. @internal
    */
-  recomputeBounds(stock: number, soldOut: number, keepQty: boolean): boolean {
+  recomputeBounds(stock: number, soldOut: number, keepQty: boolean, limit = 0): boolean {
     let min: number;
     let max: number;
     let qty: number;
@@ -495,7 +555,7 @@ export class DefaultQtyStepper {
       qty = 0;
     } else {
       min = 1;
-      max = stock;
+      max = limit > 0 ? Math.min(stock, limit) : stock;
       qty = keepQty ? clamp(this._qty, min, max) : min;
     }
     if (this._qty === qty && this._min === min && this._max === max) return false;

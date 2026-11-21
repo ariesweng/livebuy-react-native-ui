@@ -146,6 +146,11 @@ export interface PlayerHeaderState {
    *  理論上都可能是限時搶購）。下游（host app 自組的 reference-ui）讀此加繪促銷徽章 / chrome；
    *  template 本身 MUST NOT 對這個旗標做任何 UI 決策。Default `false`. */
   readonly isFlashSale: boolean;
+  /** 直播管家搶購場旗標 — host-fed passthrough of `channel.saleKeywordRequired`（core
+   *  `LBPlayerChannelInfo.saleKeywordRequired`，live-bid-rn-template，parity iOS / Android
+   *  `saleKeywordRequired`）。`true` 時 `saleKeyword` 為空的商品要隱藏購買鈕（見 `isBuyButtonHidden`）。
+   *  Default `false`. */
+  readonly saleKeywordRequired: boolean;
 }
 
 /**
@@ -577,6 +582,8 @@ export class DefaultPlayerHeaderState {
   // 限時搶購（flash sale）flag — host-fed passthrough of channel.isFlashSale（channel-flash-sale-
   // flag-template-rn）。與 _isLive / _isFinishedLiveReplay 語意獨立、不互斥。Default false.
   private _isFlashSale = false;
+  // 直播管家搶購場 flag — host-fed passthrough of channel.saleKeywordRequired（live-bid-rn-template）。
+  private _saleKeywordRequired = false;
 
   get current(): PlayerHeaderState {
     return {
@@ -590,6 +597,7 @@ export class DefaultPlayerHeaderState {
       isLive: this._isLive,
       isFinishedLiveReplay: this._isFinishedLiveReplay,
       isFlashSale: this._isFlashSale,
+      saleKeywordRequired: this._saleKeywordRequired,
     };
   }
 
@@ -619,6 +627,7 @@ export class DefaultPlayerHeaderState {
     isLive?: boolean;
     isFinishedLiveReplay?: boolean;
     isFlashSale?: boolean;
+    saleKeywordRequired?: boolean;
   }): boolean {
     let changed = false;
     if (fields.title !== undefined && this._title !== fields.title) {
@@ -652,6 +661,13 @@ export class DefaultPlayerHeaderState {
       this._isFlashSale = fields.isFlashSale;
       changed = true;
     }
+    if (
+      fields.saleKeywordRequired !== undefined &&
+      this._saleKeywordRequired !== fields.saleKeywordRequired
+    ) {
+      this._saleKeywordRequired = fields.saleKeywordRequired;
+      changed = true;
+    }
     return changed;
   }
 
@@ -679,7 +695,8 @@ export class DefaultPlayerHeaderState {
       this._shareUrl.length === 0 &&
       !this._isLive &&
       !this._isFinishedLiveReplay &&
-      !this._isFlashSale
+      !this._isFlashSale &&
+      !this._saleKeywordRequired
     ) {
       return false;
     }
@@ -693,6 +710,7 @@ export class DefaultPlayerHeaderState {
     this._isLive = false;
     this._isFinishedLiveReplay = false;
     this._isFlashSale = false;
+    this._saleKeywordRequired = false;
     return true;
   }
 }

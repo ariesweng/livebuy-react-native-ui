@@ -9,6 +9,7 @@ import type { EndScreenNavRow, EndScreenHotRow } from './MomentState';
 import type { LBSideRailEnablement } from './OperationRail';
 import { LBInfoPanelTab } from './InfoTab';
 import type { CartAddRequester } from './ProductSheet';
+import type { BidConfirmRequester, BidRequester } from './LiveBid';
 import type { LBWidgetSnapshot, LBWidgetSettingsInput } from './WidgetContent';
 import type {
   SDKConfig,
@@ -106,6 +107,8 @@ const ROUTED = {
   // (parity iOS `onReplayChatRevealed` / Android). Routed into the merged feed via
   // `DefaultPlayerTemplate.handleReplayChatRevealed`.
   CHAT_HISTORY_LOADED: 'CHAT_HISTORY_LOADED',
+  // live-bid-rn-template — 得標通知（ordered / failed）→「恭喜搶購成功」視窗狀態（template.bidWon）。
+  BID_WON: 'BID_WON',
 } as const;
 
 /**
@@ -285,6 +288,13 @@ export interface AttachPlayerTemplateOptions {
    * route B (avoid the double-write). Defaults to false (template owns route B).
    */
   hostOwnsCart?: boolean;
+  /**
+   * live-bid-rn-template — 搶購場直播中 `addToCart()` 的下標 requester / 得標視窗「確定」的確認
+   * requester。template 自己已預設接 lazy-required `LivebuySDK.placeBid` / `LivebuySDK.confirmBidWin`；
+   * 這兩個欄位是 host 覆寫用的純轉送（parity `addToCartRequester`）。測試注入 fake。
+   */
+  bidRequester?: BidRequester;
+  bidConfirmRequester?: BidConfirmRequester;
   /**
    * product-sheet-stack-template / view-cart-event-rn-template — cart CTA
    * 「開啟購物車」passthrough. The template does NOT own the checkout page; the
@@ -492,6 +502,9 @@ export interface PlayerTemplateAttachment {
     // 限時搶購（flash sale）flag — host-fed passthrough of `channel.isFlashSale`
     // (channel-flash-sale-flag-template-rn). 純資料 passthrough，template 不做 UI 決策.
     isFlashSale?: boolean;
+    // 直播管家搶購場 flag — host-fed passthrough of `channel.saleKeywordRequired`
+    // (live-bid-rn-template). `true` + 商品 saleKeyword 空 → 明細 buyButtonHidden.
+    saleKeywordRequired?: boolean;
   }): void;
   /**
    * swipe-navigate-rn-template — host-fed prev/next adjacent-video ids (resolved
@@ -615,6 +628,10 @@ export interface PlayerTemplateAttachment {
    * route B AND the detail sheet (avoid the double-write).
    */
   setHostOwnsCart(owns: boolean): void;
+  /** live-bid-rn-template — 得標視窗「確定」：以全部 buyingId 呼叫確認 requester 一次後清空關閉。 */
+  confirmBidWin(): void;
+  /** live-bid-rn-template — 得標視窗「取消」：只清空關閉，不確認。 */
+  dismissBidWon(): void;
   /**
    * 把一個原始 SDK 事件轉發進這個 attachment 的內部路由(與這個 attachment 自己經
    * core `registerListener` 收到事件時的處理**完全等價**——底層都是同一個
@@ -859,6 +876,12 @@ function routeEvent(template: DefaultPlayerTemplate, event: LBSdkEvent): void {
       // forward — a separate core-layer follow-up). `handleReplayChatRevealed` itself is
       // left in place, ready for a future correct caller once that bridge exists.
       break;
+    case ROUTED.BID_WON:
+      // live-bid-rn-template — BID_WON（ordered 或 failed）→「恭喜搶購成功」視窗狀態。通知型事件：
+      // routeEvent 只觀察（registerListener handler 回傳 void、無攔截結果），host 自己的 listener 照常
+      // 收到同一個事件（parity iOS / Android aux listener `return false`）。
+      template.handleBidWon(params);
+      break;
     default:
       // Every other event is the host's own listener's responsibility; the
       // template never double-processes them.
@@ -892,6 +915,8 @@ export function attachPlayerTemplate(
       registerPendingRetryProvider: options.registerPendingRetryProvider,
       dispatchAuthRequiredProvider: options.dispatchAuthRequiredProvider,
       hostOwnsCart: options.hostOwnsCart,
+      bidRequester: options.bidRequester,
+      bidConfirmRequester: options.bidConfirmRequester,
       onOpenCart: options.onOpenCart,
       loadVideo: options.loadVideo,
       requestTogglePlayPause: options.requestTogglePlayPause,
@@ -1070,6 +1095,12 @@ export function attachPlayerTemplate(
     },
     setHostOwnsCart(owns: boolean): void {
       template.setHostOwnsCart(owns);
+    },
+    confirmBidWin(): void {
+      template.confirmBidWin();
+    },
+    dismissBidWon(): void {
+      template.dismissBidWon();
     },
     handleEvent(event: LBSdkEvent): void {
       routeEvent(template, event);
