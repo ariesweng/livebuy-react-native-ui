@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.18.2] - 2026-11-24
+
+> **純 metadata 版號 bump，零內容變動。** peer `livebuy-react-native` `^2.15.0` → `^2.15.1`（`check-ui-package-versions.sh` 要求精確對齊）。
+
 ## [1.18.1] - 2026-11-23
 
 > **純 metadata 版號 bump，零內容變動。** peer `livebuy-react-native` `^2.14.1` → `^2.15.0`（`check-ui-package-versions.sh` 要求精確對齊）。
