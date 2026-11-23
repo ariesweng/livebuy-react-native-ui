@@ -3174,6 +3174,10 @@ export class DefaultPlayerTemplate {
         soldOut: detail.soldOut,
       });
       this.cartCTA.incrementOnAdd();
+      // cart-add-success-close-detail-rn-template: close the detail in the same notification
+      // (design `confirmAddToCart` / web `addCart()`, same as a placed bid). parity iOS
+      // `applyAddSuccess` / Android `AddToCartOutcome.SUCCESS`.
+      this.productSheet.clearDetail();
       this.addToCartFailedFlag = false;
       this.addToCartNeedsLoginFlag = false;
       // cart-add-loading-state-rn: 結果回來 → 解除 in-flight（與 peek / cartCTA 同一次 coalesced notify）。

@@ -13,6 +13,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.17.1] - 2026-11-23
+
+> **view-model，patch，無 BREAKING、公開 API 不變。** peer 維持 `livebuy-react-native` `^2.14.0`；`livebuy-react-native-reference-ui`
+> `1.19.1` 的 peer `^1.17.0` 已涵蓋本版，不需另發。
+> **驗證範圍**：`tsc --noEmit`、`npx jest`（704）通過，`livebuy-react-native-reference-ui` jest 3238 通過，經獨立驗收。
+> **未經模擬器與真機實測。**
+
+### Fixed
+
+- **drop-in 一般加購成功後商品明細不會自動收起、要手動按 ✕**（`cart-add-success-close-detail-rn-template`）：成功時
+  `DefaultPlayerTemplate` 一併收起商品明細（從商品清單進入的回到清單），對齊設計稿與網頁前台、與 iOS／Android／Flutter 相同。
+  加購失敗、需登入、30 秒內重複加購保持開啟；不自動開購物車、不派 `VIEW_CART`。自繪畫面、假設成功後 `productDetailState`
+  仍在的 host 需調整。
+
 ## [1.17.0] - 2026-11-22
 
 > **view-model，minor，無 BREAKING。** peer `livebuy-react-native` `^2.13.0` → `^2.14.0`。
