@@ -13,6 +13,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.18.0] - 2026-11-23
+
+> **view-model，minor，無 BREAKING（只新增 `DefaultPlayerTemplate.handleBidPlaceResult`）。** peer 升為 `livebuy-react-native` `^2.14.1`
+> （同批發版）；`livebuy-react-native-reference-ui` `1.19.1` 的 peer `^1.17.0` 已涵蓋本版，不需另發。
+> **驗證範圍**：`tsc --noEmit`、`npx jest`（717）通過，`livebuy-react-native-reference-ui` jest 3238 通過，經獨立驗收。**未經模擬器與真機實測。**
+
+### Added
+
+- `DefaultPlayerTemplate.handleBidPlaceResult(params)`：接收 core `BID_PLACE_RESULT`（由 `TemplateAttachment` 自動路由）。
+
+### Fixed
+
+- **聊天室「關鍵字+數量」下標沒有「已加入搶購」提示**（`keyword-bid-result-toast-rn-template`）：關鍵字下標由原生 core 在背景送出，
+  view-model 以前只在按鈕下標設定下標結果。現在對 `is_keyword` 為真的結果設定 `bidOutcome`，drop-in 顯示與按鈕下標相同的提示；
+  按鈕下標事件與換片後才到的舊結果忽略。
+- **直播中商品資料刷新沒有即時反映到 view-model**（`product-overlay-content-diff-rn-template`）：ProductOverlay 快照原本只在商品
+  id 清單或介紹中商品改變時才更新，core 每 5 秒帶回的下標數、庫存、售完等欄位變動被丟掉——搶購場下標後重開商品明細看不到
+  「正在等待結果...」，庫存與「已售完」也不會即時更新。現改為依商品完整內容判斷變更；內容相同的刷新仍不通知。與 iOS／Android／
+  Flutter 同批。
+
 ## [1.17.1] - 2026-11-23
 
 > **view-model，patch，無 BREAKING、公開 API 不變。** peer 維持 `livebuy-react-native` `^2.14.0`；`livebuy-react-native-reference-ui`

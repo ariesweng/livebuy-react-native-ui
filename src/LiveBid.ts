@@ -117,6 +117,20 @@ function stringParam(params: Record<string, unknown>, key: string): string {
   return typeof value === 'string' ? value : '';
 }
 
+/**
+ * keyword-bid-result-toast-rn-template（parity iOS `keywordBidOutcome`）：聊天關鍵字下標的
+ * `BID_PLACE_RESULT` params → 結果（每次回傳新物件，reference-ui 的 effect 以參考比對，連續相同結果也會提示）；
+ * 按鈕下標（`is_keyword` 為假）回 null。`is_keyword` 接受 boolean、`1` 或 `'1'`。
+ */
+export function keywordBidOutcome(params: Record<string, unknown>): LBBidOutcome | null {
+  const raw = params.is_keyword;
+  const isKeyword = raw === true || raw === 1 || raw === '1';
+  if (!isKeyword) return null;
+  if (params.status === 'placed') return { type: 'placed' };
+  const code = params.backend_error_code;
+  return { type: 'failed', code: typeof code === 'string' && code !== '' ? code : null };
+}
+
 /** PURE：`BID_WON` params → 一筆得標；沒有非空字串 `buying_id` 回 `null`。 */
 export function bidWonItemFromParams(params: Record<string, unknown>): LBBidWonItem | null {
   const buyingId = stringParam(params, 'buying_id');

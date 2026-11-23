@@ -109,6 +109,8 @@ const ROUTED = {
   CHAT_HISTORY_LOADED: 'CHAT_HISTORY_LOADED',
   // live-bid-rn-template — 得標通知（ordered / failed）→「恭喜搶購成功」視窗狀態（template.bidWon）。
   BID_WON: 'BID_WON',
+  // keyword-bid-result-toast-rn-template — 聊天關鍵字下標結果 → template.bidOutcome（與按鈕下標相同提示）。
+  BID_PLACE_RESULT: 'BID_PLACE_RESULT',
 } as const;
 
 /**
@@ -894,6 +896,11 @@ function routeEvent(template: DefaultPlayerTemplate, event: LBSdkEvent): void {
       // routeEvent 只觀察（registerListener handler 回傳 void、無攔截結果），host 自己的 listener 照常
       // 收到同一個事件（parity iOS / Android aux listener `return false`）。
       template.handleBidWon(params);
+      break;
+    case ROUTED.BID_PLACE_RESULT:
+      // keyword-bid-result-toast-rn-template — 聊天「關鍵字+數量」下標由原生 core 在背景送出，只有這個事件帶回
+      // 結果；按鈕下標的事件在 handleBidPlaceResult 內忽略。通知型事件，host listener 照常收到。
+      template.handleBidPlaceResult(params);
       break;
     default:
       // Every other event is the host's own listener's responsibility; the

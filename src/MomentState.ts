@@ -530,11 +530,13 @@ export class DefaultProductOverlayState {
   /**
    * Apply a fresh products snapshot. `active` is the narrate_status==2 item the
    * host/bridge resolved (narrate_status is a poll/raw field NOT on LBProduct).
-   * Returns whether the snapshot actually changed (id-diff). @internal
+   * Returns whether the snapshot actually changed (content-diff: same ids with a
+   * changed field such as buyingNum / stock / soldOut also count —
+   * product-overlay-content-diff-rn-template, parity iOS `sameContent`). @internal
    */
   handleSnapshot(products: readonly LBProduct[], active: LBProduct | null): boolean {
-    const sameList = idsEqual(this._products, products);
-    const sameActive = (this._activeProduct?.id ?? null) === (active?.id ?? null);
+    const sameList = productsContentEqual(this._products, products);
+    const sameActive = deepEqual(this._activeProduct, active);
     if (sameList && sameActive) return false;
     this._products = products.slice();
     this._activeProduct = active;
@@ -550,13 +552,33 @@ export class DefaultProductOverlayState {
   }
 }
 
-/** True when both product lists hold the same ids in the same order. */
-function idsEqual(a: readonly LBProduct[], b: readonly LBProduct[]): boolean {
+/** True when both product lists hold equal products (full content) in the same order. */
+export function productsContentEqual(a: readonly LBProduct[], b: readonly LBProduct[]): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) {
-    if (a[i]!.id !== b[i]!.id) return false;
+    if (!deepEqual(a[i], b[i])) return false;
   }
   return true;
+}
+
+/**
+ * Structural equality for bridge-delivered plain data (objects / arrays / primitives,
+ * nested specifications included). Key order does not matter; `undefined`-valued keys
+ * count as present.
+ */
+function deepEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  if (Array.isArray(a)) {
+    const bb = b as unknown[];
+    return a.length === bb.length && a.every((v, i) => deepEqual(v, bb[i]));
+  }
+  const ao = a as Record<string, unknown>;
+  const bo = b as Record<string, unknown>;
+  const keys = Object.keys(ao);
+  if (keys.length !== Object.keys(bo).length) return false;
+  return keys.every((k) => Object.prototype.hasOwnProperty.call(bo, k) && deepEqual(ao[k], bo[k]));
 }
 
 /**

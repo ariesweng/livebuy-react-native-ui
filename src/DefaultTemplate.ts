@@ -94,6 +94,7 @@ import {
   classifyBidRejection,
   effectiveLimitNum,
   isBuyButtonHidden,
+  keywordBidOutcome,
   type BidConfirmRequester,
   type BidRequester,
   type LBBidOutcome,
@@ -3286,6 +3287,22 @@ export class DefaultPlayerTemplate {
     const rejection = classifyBidRejection(error);
     if (rejection.type === 'needsLogin') this.addToCartNeedsLoginFlag = true;
     if (rejection.type === 'failed') this.bidOutcomeValue = { type: 'failed', code: rejection.code };
+    this.notifyChange();
+  }
+
+  /**
+   * core `BID_PLACE_RESULT` 來自聊天關鍵字下標（`is_keyword` 為真）→ {@link bidOutcome}，reference-ui 顯示
+   * 與按鈕下標相同的「已加入搶購」／失敗提示（網頁關鍵字+1 也會提示）。按鈕下標忽略（其 requester 已設定結果）；
+   * 事件 `video_id` 不是目前影片（換片後才到）→ 忽略。由 `TemplateAttachment.routeEvent` 呼叫。
+   * parity iOS / Android `handleBidPlaceResult`（keyword-bid-result-toast-rn-template）。
+   */
+  handleBidPlaceResult(params: Record<string, unknown>): void {
+    const outcome = keywordBidOutcome(params);
+    if (outcome === null) return;
+    const eventVideo = typeof params.video_id === 'string' ? params.video_id : '';
+    const current = this.currentVideoIdValue ?? '';
+    if (eventVideo !== '' && current !== '' && eventVideo !== current) return;
+    this.bidOutcomeValue = outcome;
     this.notifyChange();
   }
 
