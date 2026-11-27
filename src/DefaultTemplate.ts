@@ -54,8 +54,11 @@ import {
 import {
   DefaultAuthGate,
   DefaultIdentityLabel,
+  GUEST_VIEWER_IDENTITY,
+  identityTransition,
   type LBAuthGateState,
   type LBIdentityLabel,
+  type ViewerIdentity,
 } from './AuthGate';
 import {
   DefaultGoodsTracking,
@@ -937,6 +940,26 @@ export class DefaultPlayerTemplate {
   private submitInFlightFlag = false;
 
   /**
+   * template-clear-viewer-state-on-identity-change — winner ids dropped by
+   * {@link clearViewerStateForIdentityChange}. A host sheet may still hold the previous
+   * viewer's `LBWinner`, so {@link submitAwardClaim} refuses these ids (otherwise the next
+   * viewer's token would claim the previous viewer's ticket). A fresh `WIN_RECEIVED` of the
+   * same id lifts the block.
+   */
+  private readonly revokedWinnerIds = new Set<string>();
+
+  /**
+   * template-clear-viewer-state-on-identity-change — set when an identity change happened
+   * while a previous submit may still be outstanding: its late `AWARD_CLAIM_RESULT` (possibly
+   * carrying the previous viewer's award code) MUST NOT reach the next viewer. Cleared by the
+   * next submit.
+   */
+  private dropsLateClaimResult = false;
+
+  /** Last identity seen through `AUTH_STATE_CHANGED`; see `identityTransition`. */
+  private viewerIdentity: ViewerIdentity = GUEST_VIEWER_IDENTITY;
+
+  /**
    * activity-sheet-multi-activity-template-rn — the full list of currently-running
    * live-shopping activities (backend `event[]`), in intake-arrival order (push
    * upsert / pull snapshot overwrite — see {@link handleActiveEventStarted} /
@@ -1252,7 +1275,37 @@ export class DefaultPlayerTemplate {
     const dn = typeof params.display_name === 'string' ? params.display_name : undefined;
     let changed = this.identityLabel.update(state, dn);
     if (state === 'logged_in' && this.authGate.clearOnLogin()) changed = true;
+    // template-clear-viewer-state-on-identity-change — a different viewer MUST NOT inherit the
+    // previous viewer's wins / award code / bid wins; folded into the same single notification.
+    const transition = identityTransition(this.viewerIdentity, state, params.external_user_id);
+    this.viewerIdentity = transition.next;
+    if (transition.clearsViewerState && this.clearViewerStateForIdentityChange()) changed = true;
     if (changed) this.notifyChange();
+  }
+
+  /**
+   * template-clear-viewer-state-on-identity-change — drop the previous viewer's win-claim
+   * state (unclaimed set, result incl. award code, `lastSubmittedWinnerId`, in-flight flag)
+   * and the bid-won items, reusing each model's own clear. Returns whether anything changed;
+   * the caller fires the single notification.
+   */
+  private clearViewerStateForIdentityChange(): boolean {
+    const changed =
+      this.unclaimed.count > 0 ||
+      this.latestClaimResult !== null ||
+      this.submitInFlightFlag ||
+      this.lastSubmittedWinnerId !== null;
+    for (const w of this.unclaimed.winners) this.revokedWinnerIds.add(w.id);
+    if (this.lastSubmittedWinnerId !== null) {
+      this.revokedWinnerIds.add(this.lastSubmittedWinnerId);
+      this.dropsLateClaimResult = true;
+    }
+    this.unclaimed.clear();
+    this.latestClaimResult = null;
+    this.submitInFlightFlag = false;
+    this.lastSubmittedWinnerId = null;
+    const bidCleared = this.bidWon.clear();
+    return changed || bidCleared;
   }
 
   /**
@@ -1696,6 +1749,7 @@ export class DefaultPlayerTemplate {
   handleWinReceived(winner: LBWinner, text: string): void {
     this.winReceivedCount += 1;
     this.feed.appendActivity(ActivityTier.Win, text, winner);
+    if (winner?.id != null) this.revokedWinnerIds.delete(winner.id);
     this.unclaimed.add(winner);
     // §B — ONE win event = ONE coalesced notification (feed append + unclaimed
     // recordWin are two facets of the same single state-change event).
@@ -1802,6 +1856,7 @@ export class DefaultPlayerTemplate {
   submitAwardClaim(winner: LBWinner, email: string): boolean;
   submitAwardClaim(winner: LBWinner, email?: string): boolean {
     if (this.submitInFlightFlag) return false;
+    if (winner?.id != null && this.revokedWinnerIds.has(winner.id)) return false;
     if (email === undefined) {
       // DEPRECATED EMAIL-LESS entry point — contact stays undefined (there is no
       // email to carry). Same state machine, no email smuggling.
@@ -1820,6 +1875,7 @@ export class DefaultPlayerTemplate {
    */
   private beginSubmit(winner: LBWinner, contact?: LBAwardClaimInput): void {
     this.lastSubmittedWinnerId = winner?.id ?? null;
+    this.dropsLateClaimResult = false;
     this.latestClaimResult = null;
     this.submitInFlightFlag = true;
     this.requestAwardClaim?.(winner, contact);
@@ -1871,6 +1927,8 @@ export class DefaultPlayerTemplate {
     params: Pick<LBAwardClaimResultParams, 'status' | 'award_type' | 'event_id' | 'award_code'>,
     winnerId?: string,
   ): void {
+    // A result for a submit made before an identity change belongs to the previous viewer.
+    if (this.dropsLateClaimResult) return;
     this.latestClaimResult = mapAwardClaimResult(params);
     this.submitInFlightFlag = false;
     if (params.status === 'claimed') {

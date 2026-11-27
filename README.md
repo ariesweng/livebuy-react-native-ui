@@ -13,8 +13,8 @@ renders. Ships no pixel-rendering code of its own — pure TypeScript view-model
 > [`livebuy-react-native`](https://github.com/ariesweng/livebuy-react-native) (headless core, peer
 > dependency). Most integrators also want
 > [`livebuy-react-native-reference-ui`](https://github.com/ariesweng/livebuy-react-native-reference-ui)
-> on top of this package for the actual drop-in pixel rendering. npm installs are **not
-> transitive** — declare each package you need as its own dependency line.
+> on top of this package for the actual drop-in pixel rendering. Declare each package you need as
+> its own git dependency line — see Installation for why a missing line is not harmless.
 
 ---
 
@@ -31,6 +31,14 @@ renders. Ships no pixel-rendering code of its own — pure TypeScript view-model
 
 Then `npm install` (or `yarn` / `pnpm install`). No registry account or `.npmrc` token needed —
 these are plain public git dependencies.
+
+> **Declare every package you need.** This package declares
+> `peerDependencies.livebuy-react-native` as an ordinary registry version range, and npm 7+
+> installs missing peers automatically. If `livebuy-react-native` is not in your `dependencies`,
+> npm fetches a package with that name from registry.npmjs.org — where Livebuy does not publish
+> it. Only the packages you declare yourself are installed from this git channel — **so declare
+> each Livebuy package you use as its own `git+https://…` dependency line** (do not rely on
+> `legacy-peer-deps` to silence the peer).
 
 > **Why a git dependency and not npm registry?** The SDK is not (yet) published to the public npm
 > registry; this mirror repository is the supported remote consumption channel. The tag you pin

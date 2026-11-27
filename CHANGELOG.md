@@ -13,6 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.19.0] - 2026-11-27
+
+> **view-model，minor，無 BREAKING、公開 API 不變。** peer `livebuy-react-native` `^2.15.1` → `^2.16.0`（`check-ui-package-versions.sh` 要求精確對齊）。
+> **驗證範圍**：`tsc --noEmit`、`npx jest` 通過（來源 change 經獨立驗收）。**未經模擬器與真機實測。**
+
+### Fixed
+
+- 登出，或換成不同（或無法辨識）的會員登入時，`DefaultTemplate` 清除上一位觀眾的未領中獎、領獎結果與得標狀態，下一位觀眾不再看到
+  （`template-clear-viewer-state-on-identity-change`）。同一會員重新登入（兩次 `external_user_id` 都有值且相同）不清除。
+  Android 上要搭配 core `2.16.0`（原生 `4.34.0` 才送 `external_user_id`）；搭配舊 core 時，重複登入同一會員也會被當成換人而清除。
+
 ## [1.18.2] - 2026-11-24
 
 > **純 metadata 版號 bump，零內容變動。** peer `livebuy-react-native` `^2.15.0` → `^2.15.1`（`check-ui-package-versions.sh` 要求精確對齊）。

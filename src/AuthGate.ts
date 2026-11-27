@@ -151,3 +151,38 @@ export class DefaultIdentityLabel {
     return true;
   }
 }
+
+// MARK: - Viewer identity transition (template-clear-viewer-state-on-identity-change)
+
+/** Last identity seen through `AUTH_STATE_CHANGED` (`loggedIn: false` = guest / not yet seen). */
+export interface ViewerIdentity {
+  readonly loggedIn: boolean;
+  readonly externalUserId: string | null;
+}
+
+export const GUEST_VIEWER_IDENTITY: ViewerIdentity = { loggedIn: false, externalUserId: null };
+
+/**
+ * Pure (parity iOS / Android `identityTransition`): does this `AUTH_STATE_CHANGED` mean a
+ * different viewer?
+ *  - `logged_out` → yes (forget the identity).
+ *  - `logged_in` after guest / nothing seen → no (guest → login keeps the guest's wins: a
+ *    product award blocked by `requireLoginForAddToCart` is claimed right after login).
+ *  - `logged_in` after `logged_in` → no only when both `external_user_id`s are non-empty and
+ *    equal; a missing id cannot prove "same viewer", so it clears.
+ *  - `guest` (nickname set) / unknown states → no, identity unchanged.
+ */
+export function identityTransition(
+  previous: ViewerIdentity,
+  state: string,
+  externalUserId: unknown,
+): { clearsViewerState: boolean; next: ViewerIdentity } {
+  if (state === 'logged_out') return { clearsViewerState: true, next: GUEST_VIEWER_IDENTITY };
+  if (state !== 'logged_in') return { clearsViewerState: false, next: previous };
+  const id = typeof externalUserId === 'string' && externalUserId !== '' ? externalUserId : null;
+  const sameViewer = id !== null && id === previous.externalUserId;
+  return {
+    clearsViewerState: previous.loggedIn && !sameViewer,
+    next: { loggedIn: true, externalUserId: id },
+  };
+}
